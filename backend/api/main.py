@@ -1,10 +1,16 @@
-from fastapi import FastAPI
+import shutil
+from pathlib import Path
+
+from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
-from agents.gherkin_agent import app_graph
-from rag.ingest import ingest_spec
+from api.gherkin_agent import app_graph
+from api.rag.ingest import ingest_spec
+from api.rag.vector_store import rebuild_rag
 
 from fastapi.middleware.cors import CORSMiddleware
 
+UPLOAD_DIR = Path("uploaded_docs")
+UPLOAD_DIR.mkdir(exist_ok=True)
 app = FastAPI()
 
 # Add CORS middleware
@@ -44,4 +50,20 @@ def generate(req: SpecRequest):
 
     return {
         "gherkin": result.get("output", "No output")
+    }
+    
+@app.post("/upload-specification")
+async def upload_specification(file: UploadFile = File(...)):
+
+    file_path = UPLOAD_DIR / file.filename
+
+    # sauvegarde fichier
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    # reconstruction complète du RAG
+    rebuild_rag()
+
+    return {
+        "message": f"{file.filename} uploadé et RAG reconstruit"
     }

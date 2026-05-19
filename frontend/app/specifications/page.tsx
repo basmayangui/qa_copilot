@@ -13,6 +13,7 @@ import {
   Eye,
   Search,
   Clock3,
+  Loader2,
 } from "lucide-react";
 
 type UploadedFile = {
@@ -28,23 +29,12 @@ export default function SpecificationsPage() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const [files, setFiles] = useState<UploadedFile[]>([
-    {
-      id: 1,
-      name: "Cahier_des_charges_Ecommerce.pdf",
-      type: "PDF",
-      size: "2.4 MB",
-      date: "2025-05-22 14:32",
-    },
-    {
-      id: 2,
-      name: "User_Stories_Banking.docx",
-      type: "DOCX",
-      size: "1.1 MB",
-      date: "2025-05-22 16:10",
-    },
+    
   ]);
 
-  function handleUpload(
+  const [uploading, setUploading] = useState(false);
+
+  async function handleUpload(
     event: React.ChangeEvent<HTMLInputElement>
   ) {
 
@@ -52,21 +42,67 @@ export default function SpecificationsPage() {
 
     if (!selectedFiles) return;
 
-    const newFiles = Array.from(selectedFiles).map(
-      (file, index) => ({
-        id: Date.now() + index,
-        name: file.name,
-        type:
-          file.name.split(".").pop()?.toUpperCase() ||
-          "FILE",
-        size: `${(file.size / 1024 / 1024).toFixed(
-          2
-        )} MB`,
-        date: new Date().toLocaleString(),
-      })
-    );
+    setUploading(true);
 
-    setFiles((prev) => [...newFiles, ...prev]);
+    try {
+
+      const uploadedFiles: UploadedFile[] = [];
+
+      for (const file of Array.from(selectedFiles)) {
+
+        // FRONT → BACKEND
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const response = await fetch(
+          "http://localhost:8000/upload-specification",
+          {
+            method: "POST",
+            body: formData,
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error("Erreur upload");
+        }
+
+        uploadedFiles.push({
+          id: Date.now() + Math.random(),
+          name: file.name,
+          type:
+            file.name.split(".").pop()?.toUpperCase() ||
+            "FILE",
+          size: `${(
+            file.size /
+            1024 /
+            1024
+          ).toFixed(2)} MB`,
+          date: new Date().toLocaleString(),
+        });
+      }
+
+      setFiles((prev) => [
+        ...uploadedFiles,
+        ...prev,
+      ]);
+
+      alert(
+        "Documents uploadés et RAG reconstruit avec succès."
+      );
+
+    } catch (error) {
+
+      console.error(error);
+
+      alert(
+        "Erreur lors de l’upload ou de la reconstruction du RAG."
+      );
+
+    } finally {
+
+      setUploading(false);
+    }
   }
 
   function removeFile(id: number) {
@@ -186,7 +222,10 @@ export default function SpecificationsPage() {
               </p>
 
               <button
-                onClick={() => inputRef.current?.click()}
+                disabled={uploading}
+                onClick={() =>
+                  inputRef.current?.click()
+                }
                 className="
                   px-8
                   py-4
@@ -199,9 +238,27 @@ export default function SpecificationsPage() {
                   to-[#F59E0B]
                   hover:opacity-90
                   transition
+                  disabled:opacity-50
+                  flex
+                  items-center
+                  gap-3
+                  mx-auto
                 "
               >
-                Ajouter des fichiers
+                {uploading ? (
+                  <>
+                    <Loader2
+                      size={22}
+                      className="animate-spin"
+                    />
+                    Reconstruction du RAG...
+                  </>
+                ) : (
+                  <>
+                    <Upload size={22} />
+                    Ajouter des fichiers
+                  </>
+                )}
               </button>
 
               <input
@@ -344,7 +401,6 @@ export default function SpecificationsPage() {
                           "
                         >
                           <Clock3 size={14} />
-
                           {file.date}
                         </span>
 
@@ -453,7 +509,7 @@ export default function SpecificationsPage() {
                   <div
                     className="
                       h-full
-                      w-[78%]
+                      w-full
                       bg-gradient-to-r
                       from-[#7C3AED]
                       to-[#F59E0B]
@@ -495,7 +551,7 @@ export default function SpecificationsPage() {
                     </h3>
 
                     <p className="text-green-400 text-sm">
-                      FAISS opérationnel
+                      Chroma opérationnel
                     </p>
 
                   </div>
@@ -541,11 +597,15 @@ export default function SpecificationsPage() {
               </li>
 
               <li>
-                • vectorisés dans FAISS
+                • vectorisés dans Chroma
               </li>
 
               <li>
                 • utilisés pour générer les cas QA
+              </li>
+
+              <li>
+                • réindexés après chaque upload
               </li>
 
             </ul>
