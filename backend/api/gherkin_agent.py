@@ -1,9 +1,10 @@
 from typing import TypedDict
 
-from langgraph.graph import StateGraph
+from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 
-from rag.retriever import retrieve_context
+from api.rag.retriever import retrieve_context
+from api.rag.vector_store import get_retriever
 
 import os
 from dotenv import load_dotenv
@@ -20,16 +21,16 @@ class AgentState(TypedDict, total=False):
 
 def retrieve_node(state: AgentState):
 
-    query = state.get("input", "")
+    user_input = state.get("input", "")
 
-    docs = retrieve_context(query)
+    docs = retrieve_context(user_input)
 
     context = "\n".join([
         d.page_content for d in docs
     ])
 
     return {
-        "input": query,
+        "input": user_input,
         "context": context
     }
 
@@ -61,6 +62,6 @@ graph.add_node("generate", generate_gherkin)
 
 graph.set_entry_point("retrieve")
 graph.add_edge("retrieve", "generate")
-graph.set_finish_point("generate")
+graph.add_edge("generate", END)
 
 app_graph = graph.compile()
