@@ -28,13 +28,10 @@ def rebuild_rag():
 
     # reload tous les documents
     for file in UPLOAD_DIR.iterdir():
-
         if file.is_file():
-
             try:
                 docs = load_document(str(file))
                 documents.extend(docs)
-
             except Exception as e:
                 print(f"Erreur {file.name}: {e}")
 
@@ -49,10 +46,7 @@ def rebuild_rag():
         collection_name="expersi_qa",
     )
 
-    vectordb.persist()
-
     print("RAG reconstruit")
-
     return vectordb
 
 def get_retriever():

@@ -1,0 +1,36 @@
+# =====================================================================
+# EXPERSI QA Copilot — Backend requirements
+# Python 3.11 (conda)
+#
+# Installation :
+#   conda create -n qa_copilot python=3.11 -y
+#   conda activate qa_copilot
+#   pip install -r requirements.txt
+# =====================================================================
+
+# ---------- API ----------
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.9.0
+python-multipart>=0.0.12
+python-dotenv>=1.0.1
+
+# ---------- LangChain / LangGraph ----------
+langgraph>=0.2.50
+langchain>=0.3.10
+langchain-core>=0.3.20
+langchain-openai>=0.2.10
+langchain-community>=0.3.10
+langchain-text-splitters>=0.3.0
+langchain-chroma>=0.1.4
+
+# ---------- LLM provider ----------
+openai>=1.50.0
+tiktoken>=0.8.0
+
+# ---------- Vector DB ----------
+chromadb>=0.5.20
+
+# ---------- Document loaders ----------
+pypdf>=5.0.0
+docx2txt>=0.8
