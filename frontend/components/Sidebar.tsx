@@ -78,7 +78,23 @@ export default function Sidebar() {
 
         {/* LOGO */}
 
-        <div className="mb-12">
+        <Link
+          href="/"
+          aria-label="Retour à l'accueil"
+          className="
+            mb-12
+            block
+            cursor-pointer
+            rounded-xl
+            transition
+            hover:opacity-90
+            focus:outline-none
+            focus-visible:ring-2
+            focus-visible:ring-[#A855F7]
+            focus-visible:ring-offset-2
+            focus-visible:ring-offset-[#070B1A]
+          "
+        >
 
           <h1
             className="
@@ -107,7 +123,7 @@ export default function Sidebar() {
 
           </h1>
 
-        </div>
+        </Link>
 
         {/* MENU */}
 
