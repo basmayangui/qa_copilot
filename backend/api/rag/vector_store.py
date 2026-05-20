@@ -1,5 +1,6 @@
 import json
 import shutil
+import threading
 from pathlib import Path
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -7,6 +8,11 @@ from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 
 from api.rag.loaders import load_document
+
+
+# Verrou global : empêche deux rebuilds simultanés (watcher + endpoint
+# upload, ou deux uploads concurrents).
+_rebuild_lock = threading.Lock()
 
 UPLOAD_DIR = Path("uploaded_docs")
 CHROMA_DIR = Path("chroma_db")
@@ -50,42 +56,45 @@ def _release_chroma_clients() -> None:
 
 def rebuild_rag():
 
-    # On libère les handles ouverts par chromadb avant de toucher au dossier,
-    # sinon SQLite refuse d'écrire dans la nouvelle base (code 1032).
-    _release_chroma_clients()
+    with _rebuild_lock:
 
-    # suppression ancien index
-    if CHROMA_DIR.exists():
-        shutil.rmtree(CHROMA_DIR)
+        # On libère les handles ouverts par chromadb avant de toucher au
+        # dossier, sinon SQLite refuse d'écrire dans la nouvelle base
+        # (code 1032 SQLITE_READONLY_DBMOVED).
+        _release_chroma_clients()
 
-    documents = []
+        # suppression ancien index
+        if CHROMA_DIR.exists():
+            shutil.rmtree(CHROMA_DIR)
 
-    # reload tous les documents
-    for file in UPLOAD_DIR.iterdir():
-        if file.is_file():
-            try:
-                docs = load_document(str(file))
-                documents.extend(docs)
-            except Exception as e:
-                print(f"Erreur {file.name}: {e}")
+        documents = []
 
-    # chunking
-    chunks = text_splitter.split_documents(documents)
+        # reload tous les documents
+        for file in UPLOAD_DIR.iterdir():
+            if file.is_file():
+                try:
+                    docs = load_document(str(file))
+                    documents.extend(docs)
+                except Exception as e:
+                    print(f"Erreur {file.name}: {e}")
 
-    # rebuild Chroma
-    vectordb = Chroma.from_documents(
-        documents=chunks,
-        embedding=embedding_model,
-        persist_directory=str(CHROMA_DIR),
-        collection_name="expersi_qa",
-    )
+        # chunking
+        chunks = text_splitter.split_documents(documents)
 
-    # On sauvegarde un manifeste pour pouvoir détecter,
-    # au prochain démarrage, si uploaded_docs/ a été modifié à la main.
-    _write_manifest(_current_manifest())
+        # rebuild Chroma
+        vectordb = Chroma.from_documents(
+            documents=chunks,
+            embedding=embedding_model,
+            persist_directory=str(CHROMA_DIR),
+            collection_name="expersi_qa",
+        )
 
-    print("RAG reconstruit")
-    return vectordb
+        # On sauvegarde un manifeste pour pouvoir détecter, au prochain
+        # tour, si uploaded_docs/ a été modifié à la main.
+        _write_manifest(_current_manifest())
+
+        print("RAG reconstruit")
+        return vectordb
 
 def get_retriever():
 
