@@ -1,17 +1,28 @@
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 from api.gherkin_agent import app_graph
 from api.rag.ingest import ingest_spec
-from api.rag.vector_store import rebuild_rag
+from api.rag.vector_store import rebuild_rag, ensure_rag_ready
 
 from fastapi.middleware.cors import CORSMiddleware
 
 UPLOAD_DIR = Path("uploaded_docs")
 UPLOAD_DIR.mkdir(exist_ok=True)
-app = FastAPI()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup : on garantit que le RAG est prêt avant d'accepter des requêtes.
+    ensure_rag_ready()
+    yield
+    # Shutdown : rien à faire pour l'instant.
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Add CORS middleware
 app.add_middleware(
