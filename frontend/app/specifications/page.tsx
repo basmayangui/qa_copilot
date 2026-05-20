@@ -2,7 +2,7 @@
 
 "use client";
 
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   Upload,
@@ -16,23 +16,73 @@ import {
   Loader2,
 } from "lucide-react";
 
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+
 type UploadedFile = {
-  id: number;
+  id: string;
   name: string;
   type: string;
   size: string;
   date: string;
 };
 
+// --- Backend payload ---
+type ServerFile = {
+  name: string;
+  size: number;
+  uploaded_at: string;
+};
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} o`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function mapServerFile(f: ServerFile): UploadedFile {
+  return {
+    id: f.name, // le nom est unique côté disque, on s'en sert comme id stable
+    name: f.name,
+    type: f.name.split(".").pop()?.toUpperCase() || "FILE",
+    size: formatSize(f.size),
+    date: new Date(f.uploaded_at).toLocaleString(),
+  };
+}
+
 export default function SpecificationsPage() {
 
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const [files, setFiles] = useState<UploadedFile[]>([
-    
-  ]);
+  // ↳ l'historique est désormais hydraté depuis le backend, pas conservé
+  //   uniquement dans le state React. Donc il survit aux hot reloads.
+  const [files, setFiles] = useState<UploadedFile[]>([]);
 
   const [uploading, setUploading] = useState(false);
+
+  // --- Chargement initial + helper réutilisable ---
+  const fetchHistory = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/specifications`, {
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: ServerFile[] = await res.json();
+      // tri du plus récent au plus ancien
+      data.sort(
+        (a, b) =>
+          new Date(b.uploaded_at).getTime() -
+          new Date(a.uploaded_at).getTime(),
+      );
+      setFiles(data.map(mapServerFile));
+    } catch (err) {
+      console.error("Impossible de charger l'historique :", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchHistory();
+  }, [fetchHistory]);
 
   async function handleUpload(
     event: React.ChangeEvent<HTMLInputElement>
@@ -46,8 +96,6 @@ export default function SpecificationsPage() {
 
     try {
 
-      const uploadedFiles: UploadedFile[] = [];
-
       for (const file of Array.from(selectedFiles)) {
 
         // FRONT → BACKEND
@@ -56,7 +104,7 @@ export default function SpecificationsPage() {
         formData.append("file", file);
 
         const response = await fetch(
-          "http://localhost:8000/upload-specification",
+          `${API_BASE}/upload-specification`,
           {
             method: "POST",
             body: formData,
@@ -66,26 +114,11 @@ export default function SpecificationsPage() {
         if (!response.ok) {
           throw new Error("Erreur upload");
         }
-
-        uploadedFiles.push({
-          id: Date.now() + Math.random(),
-          name: file.name,
-          type:
-            file.name.split(".").pop()?.toUpperCase() ||
-            "FILE",
-          size: `${(
-            file.size /
-            1024 /
-            1024
-          ).toFixed(2)} MB`,
-          date: new Date().toLocaleString(),
-        });
       }
 
-      setFiles((prev) => [
-        ...uploadedFiles,
-        ...prev,
-      ]);
+      // Source de vérité = le backend. On recharge l'historique
+      // au lieu d'ajouter en local (qui se perd au hot reload).
+      await fetchHistory();
 
       alert(
         "Documents uploadés et RAG reconstruit avec succès."
@@ -102,14 +135,27 @@ export default function SpecificationsPage() {
     } finally {
 
       setUploading(false);
+
+      // reset l'input pour pouvoir re-sélectionner le même fichier ensuite
+      if (inputRef.current) inputRef.current.value = "";
     }
   }
 
-  function removeFile(id: number) {
-
-    setFiles((prev) =>
-      prev.filter((file) => file.id !== id)
-    );
+  async function removeFile(filename: string) {
+    if (!confirm(`Supprimer "${filename}" ? Le RAG sera reconstruit.`)) {
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/specifications/${encodeURIComponent(filename)}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await fetchHistory();
+    } catch (err) {
+      console.error(err);
+      alert("Suppression impossible.");
+    }
   }
 
   return (
@@ -432,7 +478,7 @@ export default function SpecificationsPage() {
 
                     <button
                       onClick={() =>
-                        removeFile(file.id)
+                        removeFile(file.name)
                       }
                       className="
                         w-12

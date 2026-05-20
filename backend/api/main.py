@@ -2,9 +2,10 @@ import asyncio
 import os
 import shutil
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from api.gherkin_agent import app_graph
 from api.rag.ingest import ingest_spec
@@ -116,3 +117,50 @@ async def upload_specification(file: UploadFile = File(...)):
     return {
         "message": f"{file.filename} uploadé et RAG reconstruit"
     }
+
+
+# ------------------------------------------------------------------
+# Historique des spécifications (vue persistante du dossier disque)
+# ------------------------------------------------------------------
+SUPPORTED_EXTS = {".pdf", ".docx", ".txt"}
+
+
+def _safe_filename(name: str) -> str:
+    """Anti path-traversal : on garde uniquement le basename."""
+    cleaned = Path(name).name
+    if not cleaned or cleaned in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Nom de fichier invalide")
+    return cleaned
+
+
+@app.get("/specifications")
+def list_specifications():
+    """Liste les fichiers actuellement présents dans uploaded_docs/."""
+    if not UPLOAD_DIR.exists():
+        return []
+    items = []
+    for p in sorted(UPLOAD_DIR.iterdir()):
+        if not p.is_file() or p.suffix.lower() not in SUPPORTED_EXTS:
+            continue
+        stat = p.stat()
+        items.append({
+            "name": p.name,
+            "size": stat.st_size,
+            "uploaded_at": datetime.fromtimestamp(
+                stat.st_mtime, tz=timezone.utc
+            ).isoformat(),
+        })
+    return items
+
+
+@app.delete("/specifications/{filename}")
+def delete_specification(filename: str):
+    """Supprime un fichier puis reconstruit le RAG."""
+    safe = _safe_filename(filename)
+    target = UPLOAD_DIR / safe
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Fichier introuvable")
+
+    target.unlink()
+    rebuild_rag()
+    return {"status": "success", "filename": safe}
