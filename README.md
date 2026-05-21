@@ -13,7 +13,7 @@
 ![OpenAI](https://img.shields.io/badge/OpenAI-API-412991?logo=openai&logoColor=white)
 ![License](https://img.shields.io/badge/License-Proprietary-lightgrey)
 
-Copilote IA de Quality Assurance — génère automatiquement des cas de tests Gherkin, des scripts d'automatisation et des analyses d'anomalies à partir de vos spécifications fonctionnelles, en s'appuyant sur un moteur RAG local.
+Copilote IA d'Assurance Qualité — génère automatiquement des cas de tests Gherkin, des scripts d'automatisation et des analyses d'anomalies à partir des spécifications fonctionnelles, en s'appuyant sur un moteur RAG local.
 
 ---
 
@@ -132,7 +132,7 @@ Upload PDF/DOCX/TXT
 ### 1. Cloner et préparer l'environnement Python
 
 ```bash
-git clone <url-du-repo> qa_copilot
+git clone https://github.com/basmayangui/qa_copilot.git qa_copilot
 cd qa_copilot/backend
 
 conda create -n qacopilot_env python=3.11 -y
@@ -242,11 +242,15 @@ et supprimer `chroma_db/` pour reconstruire avec les nouveaux vecteurs.
 
 ### Retrieval
 
-Recherche par similarité top-`k=4` via `vectordb.as_retriever()`. Pas de MMR, pas de reranking, pas de hybrid search dans la V1.
+Quand l'utilisateur pose une question, on transforme cette question en vecteur, puis on demande à Chroma les **4 morceaux de texte les plus proches** (les plus ressemblants au sens du modèle). Ces 4 extraits sont ensuite injectés dans le prompt du LLM comme contexte pour qu'il puisse répondre en s'appuyant sur les spécifications.
+
+En V1, on s'arrête à cette recherche simple : pas de diversification des résultats (MMR), pas de re-classement par un second modèle (reranking), pas de combinaison avec une recherche par mots-clés (hybrid search). C'est volontairement minimaliste — ça suffit pour des spécifications fonctionnelles bien rédigées.
 
 ### Persistance
 
-Chroma stocke l'index dans `backend/chroma_db/` (SQLite + HNSW). La collection se nomme `expersi_qa`.
+Tout l'index vectoriel vit dans le dossier **`backend/chroma_db/`**, sur le disque local. Concrètement, c'est une petite base SQLite (pour les métadonnées) accompagnée d'un index HNSW (pour la recherche rapide entre vecteurs). Les documents sont regroupés dans une collection unique appelée **`expersi_qa`**.
+
+L'intérêt : tant que ce dossier existe, le RAG est disponible immédiatement au redémarrage du backend, sans avoir à ré-embedder les fichiers. Si on supprime le dossier, il sera reconstruit automatiquement au prochain démarrage à partir des fichiers présents dans `uploaded_docs/`.
 
 ### Détection des changements
 
@@ -278,19 +282,6 @@ git commit -m "feat: <description>"
 git push -u origin feat/<sujet>
 ```
 
-### Linter / format
-
-```bash
-# Frontend
-cd frontend
-npm run lint
-
-# Backend (à ajouter)
-pip install ruff black
-ruff check api/
-black api/
-```
-
 ### Ne pas versionner
 
 Déjà couvert par `.gitignore` :
@@ -313,21 +304,17 @@ frontend/.next/
 **Court terme**
 
 - Génération de scripts Playwright / Cypress / Selenium à partir des cas Gherkin.
-- Streaming SSE des réponses LLM pour une UX type ChatGPT.
 - Citations des sources RAG dans les réponses du chat et de Gherkin.
-- Authentification utilisateur.
 
 **Moyen terme**
 
 - Campagnes de tests (groupement, planification, exécution).
 - Tableaux de rapports avec métriques de couverture.
 - Multi-projets (cloisonnement par collection Chroma).
-- Reranking (Cohere Rerank ou cross-encoder).
-- Hybrid search (BM25 + dense via `EnsembleRetriever`).
+- Authentification utilisateur.
 
 **Long terme**
 
-- Multi-agents : `Gherkin Agent`, `Test Script Agent`, `Bug Analysis Agent`, `Coverage Agent`.
 - Analyse IA des anomalies à partir de logs d'exécution.
 - Intégration CI/CD (GitHub Actions, GitLab CI).
 
