@@ -75,6 +75,16 @@ app.add_middleware(
 class SpecRequest(BaseModel):
     text: str
 
+
+class ChatMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    use_rag: bool = True
+
 @app.get("/")
 def root():
     return {"message": "EXPERSI QA Copilot API running"}
@@ -164,3 +174,77 @@ def delete_specification(filename: str):
     target.unlink()
     rebuild_rag()
     return {"status": "success", "filename": safe}
+
+
+# ------------------------------------------------------------------
+# Endpoint conversationnel — assistant IA QA branché sur le RAG
+# ------------------------------------------------------------------
+from langchain_openai import ChatOpenAI
+
+from api.rag.retriever import retrieve_context
+
+# LLM partagé avec gherkin_agent — modèle léger, suffisant pour le chat
+_chat_llm = ChatOpenAI(model="gpt-5-nano")
+
+_SYSTEM_PROMPT = (
+    "Tu es l'assistant IA d'EXPERSI QA Copilot. Tu aides l'équipe QA à "
+    "comprendre les spécifications fonctionnelles, à concevoir des cas de "
+    "tests, et à analyser les anomalies. Tu réponds en français, de façon "
+    "claire, concise et professionnelle. Quand le contexte RAG fourni est "
+    "pertinent, appuie-toi dessus explicitement ; sinon réponds avec tes "
+    "connaissances générales en QA."
+)
+
+
+@app.post("/chat")
+def chat(req: ChatRequest):
+    """
+    Conversation libre avec l'assistant IA.
+
+    - `messages` : historique (user/assistant) — le dernier doit être un message user.
+    - `use_rag`  : si True, on récupère du contexte depuis Chroma sur la base
+                   du dernier message utilisateur.
+    """
+    if not req.messages:
+        raise HTTPException(status_code=400, detail="messages vide")
+
+    last_user_msg = next(
+        (m for m in reversed(req.messages) if m.role == "user"),
+        None,
+    )
+    if last_user_msg is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Pas de message utilisateur dans l'historique",
+        )
+
+    # Contexte RAG (best effort — ne casse pas si l'index n'existe pas encore)
+    context = ""
+    if req.use_rag:
+        try:
+            docs = retrieve_context(last_user_msg.content)
+            if docs:
+                context = "\n\n".join(d.page_content for d in docs)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[chat] RAG indisponible : {exc}")
+
+    # Construction du prompt façon ChatML
+    chat_messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    if context:
+        chat_messages.append({
+            "role": "system",
+            "content": (
+                "Contexte issu des spécifications indexées (RAG) :\n\n"
+                f"{context}"
+            ),
+        })
+    chat_messages.extend(
+        {"role": m.role, "content": m.content} for m in req.messages
+    )
+
+    response = _chat_llm.invoke(chat_messages)
+
+    return {
+        "reply": response.content,
+        "used_rag": bool(context),
+    }
