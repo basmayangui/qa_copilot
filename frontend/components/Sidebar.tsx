@@ -12,7 +12,6 @@ import {
   PlayCircle,
   BarChart3,
   Sparkles,
-  Bot,
 } from "lucide-react";
 
 const menu = [
@@ -186,68 +185,6 @@ export default function Sidebar() {
 
       </div>
 
-      {/* AI ASSISTANT */}
-
-      <div
-        className="
-          mt-10
-          rounded-3xl
-          border
-          border-[#7C3AED]
-          bg-gradient-to-br
-          from-[#12182B]
-          to-[#0B1020]
-          p-6
-        "
-      >
-
-        <div className="flex items-center gap-4 mb-4">
-
-          <div
-            className="
-              w-14
-              h-14
-              rounded-full
-              flex
-              items-center
-              justify-center
-              bg-gradient-to-r
-              from-[#7C3AED]
-              to-[#F59E0B]
-            "
-          >
-            <Bot size={28} />
-          </div>
-
-          <div>
-
-            <h3 className="font-semibold text-lg">
-              IA Assistant
-            </h3>
-
-            <p className="text-gray-400 text-sm">
-              Posez vos questions à l’IA
-            </p>
-
-          </div>
-
-        </div>
-
-        <button
-          className="
-            w-full
-            py-3
-            rounded-xl
-            border
-            border-[#7C3AED]
-            hover:bg-[#161E35]
-            transition
-          "
-        >
-          Ouvrir le chat
-        </button>
-
-      </div>
 
     </aside>
   );
