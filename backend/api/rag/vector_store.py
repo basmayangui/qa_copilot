@@ -69,14 +69,19 @@ def rebuild_rag():
 
         documents = []
 
-        # reload tous les documents
+        # reload tous les documents — on ignore silencieusement les fichiers
+        # parasites du système (ex: .DS_Store sur macOS, Thumbs.db sur Windows)
+        # et tout fichier dont l'extension n'est pas supportée.
         for file in UPLOAD_DIR.iterdir():
-            if file.is_file():
-                try:
-                    docs = load_document(str(file))
-                    documents.extend(docs)
-                except Exception as e:
-                    print(f"Erreur {file.name}: {e}")
+            if not file.is_file():
+                continue
+            if file.suffix.lower() not in SUPPORTED_EXTS:
+                continue
+            try:
+                docs = load_document(str(file))
+                documents.extend(docs)
+            except Exception as e:
+                print(f"Erreur {file.name}: {e}")
 
         # chunking
         chunks = text_splitter.split_documents(documents)
