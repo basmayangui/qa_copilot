@@ -68,6 +68,10 @@ export default function SpecificationsPage() {
     ? files.filter((f) => f.name.toLowerCase().includes(normalizedQuery))
     : files;
 
+  // --- URL d'ouverture du fichier brut (bouton œil) ---
+  const fileUrl = (name: string) =>
+    `${API_BASE}/specifications/${encodeURIComponent(name)}/raw`;
+
   // --- Chargement initial + helper réutilisable ---
   const fetchHistory = useCallback(async () => {
     try {
@@ -525,7 +529,12 @@ export default function SpecificationsPage() {
 
                   <div className="flex gap-3">
 
-                    <button
+                    <a
+                      href={fileUrl(file.name)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={`Ouvrir ${file.name} dans un nouvel onglet`}
+                      aria-label={`Ouvrir ${file.name} dans un nouvel onglet`}
                       className="
                         w-12
                         h-12
@@ -536,10 +545,12 @@ export default function SpecificationsPage() {
                         items-center
                         justify-center
                         hover:bg-[#111827]
+                        hover:border-[#7C3AED]
+                        transition
                       "
                     >
                       <Eye size={20} />
-                    </button>
+                    </a>
 
                     <button
                       onClick={() =>
