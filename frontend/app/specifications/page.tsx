@@ -60,6 +60,14 @@ export default function SpecificationsPage() {
 
   const [uploading, setUploading] = useState(false);
 
+  // --- Recherche dans l'historique ---
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const filteredFiles = normalizedQuery
+    ? files.filter((f) => f.name.toLowerCase().includes(normalizedQuery))
+    : files;
+
   // --- Chargement initial + helper réutilisable ---
   const fetchHistory = useCallback(async () => {
     try {
@@ -358,27 +366,84 @@ export default function SpecificationsPage() {
                   py-3
                   w-[300px]
                   h-fit
+                  focus-within:border-[#7C3AED]
+                  transition
                 "
               >
-                <Search size={18} />
+                <Search
+                  size={18}
+                  className={
+                    normalizedQuery
+                      ? "text-[#A855F7]"
+                      : "text-gray-400"
+                  }
+                />
 
                 <input
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Rechercher un fichier..."
                   className="
                     bg-transparent
                     outline-none
                     w-full
+                    placeholder:text-gray-500
                   "
                 />
+
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery("")}
+                    aria-label="Effacer la recherche"
+                    className="
+                      text-gray-400
+                      hover:text-white
+                      transition
+                    "
+                  >
+                    ×
+                  </button>
+                )}
               </div>
 
             </div>
+
+            {/* RÉSULTATS DE RECHERCHE — compteur */}
+
+            {normalizedQuery && (
+              <p className="text-sm text-gray-400 mb-4">
+                {filteredFiles.length} résultat
+                {filteredFiles.length > 1 ? "s" : ""} pour{" "}
+                <span className="text-[#A855F7]">
+                  « {searchQuery} »
+                </span>
+              </p>
+            )}
 
             {/* TABLE */}
 
             <div className="space-y-4">
 
-              {files.map((file) => (
+              {filteredFiles.length === 0 && (
+                <div
+                  className="
+                    rounded-2xl
+                    border
+                    border-dashed
+                    border-[#1E293B]
+                    bg-[#0F172A]/40
+                    py-10
+                    text-center
+                    text-gray-500
+                  "
+                >
+                  {files.length === 0
+                    ? "Aucun document indexé pour le moment."
+                    : `Aucun fichier ne correspond à « ${searchQuery} ».`}
+                </div>
+              )}
+
+              {filteredFiles.map((file) => (
 
                 <div
                   key={file.id}
