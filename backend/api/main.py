@@ -177,6 +177,37 @@ def delete_specification(filename: str):
 
 
 # ------------------------------------------------------------------
+# Ouverture du fichier brut dans un nouvel onglet (bouton œil)
+# ------------------------------------------------------------------
+import mimetypes
+from fastapi.responses import FileResponse
+
+
+@app.get("/specifications/{filename}/raw")
+def raw_specification(filename: str):
+    """
+    Sert le fichier brut (PDF/DOCX/TXT) avec Content-Disposition inline,
+    pour que le navigateur l'affiche directement quand c'est possible.
+
+    Note : les PDF et TXT s'affichent nativement dans l'onglet ;
+    les DOCX déclencheront un téléchargement (limitation navigateur).
+    """
+    safe = _safe_filename(filename)
+    target = UPLOAD_DIR / safe
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Fichier introuvable")
+    if target.suffix.lower() not in SUPPORTED_EXTS:
+        raise HTTPException(status_code=400, detail="Format non supporté")
+
+    media_type, _ = mimetypes.guess_type(str(target))
+    return FileResponse(
+        path=str(target),
+        media_type=media_type or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{safe}"'},
+    )
+
+
+# ------------------------------------------------------------------
 # Endpoint conversationnel — assistant IA QA branché sur le RAG
 # ------------------------------------------------------------------
 from langchain_openai import ChatOpenAI
