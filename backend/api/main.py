@@ -9,7 +9,12 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from api.gherkin_agent import app_graph
 from api.rag.ingest import ingest_spec
-from api.rag.vector_store import rebuild_rag, ensure_rag_ready
+from api.rag.vector_store import (
+    rebuild_rag,
+    ensure_rag_ready,
+    add_file_to_index,
+    remove_file_from_index,
+)
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -121,11 +126,13 @@ async def upload_specification(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # reconstruction complète du RAG
-    rebuild_rag()
+    # Indexation INCRÉMENTALE : seul ce fichier est embedded + ajouté
+    # à Chroma. Si une version précédente existait, ses chunks sont
+    # remplacés (re-upload safe).
+    n_chunks = add_file_to_index(file_path)
 
     return {
-        "message": f"{file.filename} uploadé et RAG reconstruit"
+        "message": f"{file.filename} uploadé et indexé ({n_chunks} chunk(s))"
     }
 
 
@@ -165,15 +172,23 @@ def list_specifications():
 
 @app.delete("/specifications/{filename}")
 def delete_specification(filename: str):
-    """Supprime un fichier puis reconstruit le RAG."""
+    """Supprime un fichier et retire ses chunks de l'index (incrémental)."""
     safe = _safe_filename(filename)
     target = UPLOAD_DIR / safe
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="Fichier introuvable")
 
     target.unlink()
-    rebuild_rag()
-    return {"status": "success", "filename": safe}
+
+    # Suppression INCRÉMENTALE : on retire uniquement les chunks de ce
+    # fichier, le reste de l'index est intact.
+    n_removed = remove_file_from_index(safe)
+
+    return {
+        "status": "success",
+        "filename": safe,
+        "chunks_removed": n_removed,
+    }
 
 
 # ------------------------------------------------------------------
@@ -218,12 +233,21 @@ from api.rag.retriever import retrieve_context
 _chat_llm = ChatOpenAI(model="gpt-5-nano")
 
 _SYSTEM_PROMPT = (
-    "Tu es l'assistant IA d'EXPERSI QA Copilot. Tu aides l'équipe QA à "
-    "comprendre les spécifications fonctionnelles, à concevoir des cas de "
-    "tests, et à analyser les anomalies. Tu réponds en français, de façon "
-    "claire, concise et professionnelle. Quand le contexte RAG fourni est "
-    "pertinent, appuie-toi dessus explicitement ; sinon réponds avec tes "
-    "connaissances générales en QA."
+    "Tu es l'assistant IA d'EXPERSI QA Copilot. Ton rôle principal est "
+    "d'aider l'équipe QA (comprendre les spécifications fonctionnelles, "
+    "concevoir des cas de tests, analyser des anomalies), mais tu peux "
+    "aussi répondre à toute question sur le contenu des documents "
+    "indexés dans le RAG, quel que soit le sujet.\n\n"
+    "Règles importantes :\n"
+    "- Quand un contexte RAG t'est fourni, considère-le comme la "
+    "source de vérité prioritaire et utilise-le activement pour "
+    "répondre, MÊME si le sujet semble éloigné de la QA.\n"
+    "- Si l'utilisateur pose une question sur un sujet présent dans "
+    "le contexte RAG, réponds à partir de ce contexte sans hésiter.\n"
+    "- Si l'information n'est ni dans le contexte ni dans tes "
+    "connaissances générales, dis-le honnêtement.\n"
+    "- Réponds en français, de façon claire, concise et "
+    "professionnelle."
 )
 
 
@@ -256,6 +280,17 @@ def chat(req: ChatRequest):
             docs = retrieve_context(last_user_msg.content)
             if docs:
                 context = "\n\n".join(d.page_content for d in docs)
+                # Debug : on log quels fichiers ont nourri la réponse
+                sources = sorted({
+                    (d.metadata or {}).get("source_filename")
+                    or (d.metadata or {}).get("source")
+                    or "?"
+                    for d in docs
+                })
+                print(
+                    f"[chat] question='{last_user_msg.content[:80]}...' "
+                    f"→ {len(docs)} chunk(s) récupéré(s) de : {sources}"
+                )
         except Exception as exc:  # noqa: BLE001
             print(f"[chat] RAG indisponible : {exc}")
 

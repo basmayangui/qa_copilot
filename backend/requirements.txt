@@ -32,5 +32,9 @@ tiktoken>=0.8.0
 chromadb>=0.5.20
 
 # ---------- Document loaders ----------
+# pypdfium2 = parser PDF natif (C++, via Google PDFium), 3-5x plus
+# rapide que pypdf pour le texte. Indispensable pour les gros corpus.
+pypdfium2>=4.30.0
+# pypdf reste installé en fallback si on veut revenir en arrière.
 pypdf>=5.0.0
 docx2txt>=0.8
