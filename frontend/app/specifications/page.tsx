@@ -32,6 +32,7 @@ type ServerFile = {
   name: string;
   size: number;
   uploaded_at: string;
+  ui_uploaded: boolean;
 };
 
 function formatSize(bytes: number): string {
@@ -58,6 +59,11 @@ export default function SpecificationsPage() {
   //   uniquement dans le state React. Donc il survit aux hot reloads.
   const [files, setFiles] = useState<UploadedFile[]>([]);
 
+  // Compteur RAG réel — tous fichiers indexés, peu importe leur origine
+  // (UI ou ajout manuel dans uploaded_docs/). Sert au panneau "Base
+  // documentaire IA" à droite, indépendamment du filtrage de la liste.
+  const [totalIndexed, setTotalIndexed] = useState(0);
+
   const [uploading, setUploading] = useState(false);
 
   // --- Recherche dans l'historique ---
@@ -80,13 +86,19 @@ export default function SpecificationsPage() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: ServerFile[] = await res.json();
+      // Total RAG = tous les fichiers indexés (UI + ajouts manuels).
+      setTotalIndexed(data.length);
+      // L'historique n'affiche QUE les fichiers ajoutés via l'UI.
+      // Les fichiers déposés à la main dans uploaded_docs/ sont bien
+      // indexés dans le RAG, mais volontairement masqués ici.
+      const uiOnly = data.filter((f) => f.ui_uploaded);
       // tri du plus récent au plus ancien
-      data.sort(
+      uiOnly.sort(
         (a, b) =>
           new Date(b.uploaded_at).getTime() -
           new Date(a.uploaded_at).getTime(),
       );
-      setFiles(data.map(mapServerFile));
+      setFiles(uiOnly.map(mapServerFile));
     } catch (err) {
       console.error("Impossible de charger l'historique :", err);
     }
@@ -94,6 +106,48 @@ export default function SpecificationsPage() {
 
   useEffect(() => {
     fetchHistory();
+  }, [fetchHistory]);
+
+  // --- Polling automatique de l'historique ---
+  // Le backend détecte les ajouts/suppressions manuels dans uploaded_docs/
+  // toutes les 30s (RAG_WATCH_INTERVAL_SEC). On rafraîchit ici toutes les
+  // 10s tant que l'onglet est visible. Tab caché → on suspend pour ne pas
+  // taper l'API pour rien.
+  useEffect(() => {
+    const POLL_INTERVAL_MS = 10_000;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const start = () => {
+      if (timer) return;
+      timer = setInterval(fetchHistory, POLL_INTERVAL_MS);
+    };
+
+    const stop = () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        // Refresh immédiat au retour de focus, puis on relance le polling
+        fetchHistory();
+        start();
+      } else {
+        stop();
+      }
+    };
+
+    if (document.visibilityState === "visible") {
+      start();
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [fetchHistory]);
 
   async function handleUpload(
@@ -615,7 +669,7 @@ export default function SpecificationsPage() {
                   </span>
 
                   <span className="font-semibold">
-                    {files.length}
+                    {totalIndexed}
                   </span>
 
                 </div>

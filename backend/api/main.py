@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shutil
 from contextlib import asynccontextmanager
@@ -20,6 +21,50 @@ from fastapi.middleware.cors import CORSMiddleware
 
 UPLOAD_DIR = Path("uploaded_docs")
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+
+# ------------------------------------------------------------------
+# Registre des fichiers uploadés via l'UI
+# ------------------------------------------------------------------
+# Sert à distinguer les fichiers ajoutés via /upload-specification
+# des fichiers déposés à la main dans uploaded_docs/. Le frontend ne
+# montre que les fichiers présents dans ce registre.
+# Fichier vide au premier démarrage (clean slate explicite).
+_UI_UPLOADS_FILE = Path(".ui_uploads.json")
+
+
+def _load_ui_uploads() -> set[str]:
+    if not _UI_UPLOADS_FILE.exists():
+        _save_ui_uploads(set())
+        return set()
+    try:
+        data = json.loads(_UI_UPLOADS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return set(data)
+        if isinstance(data, dict) and "files" in data:
+            return set(data["files"])
+    except Exception:
+        pass
+    return set()
+
+
+def _save_ui_uploads(filenames: set[str]) -> None:
+    _UI_UPLOADS_FILE.write_text(
+        json.dumps(sorted(filenames), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _register_ui_upload(filename: str) -> None:
+    s = _load_ui_uploads()
+    s.add(filename)
+    _save_ui_uploads(s)
+
+
+def _unregister_ui_upload(filename: str) -> None:
+    s = _load_ui_uploads()
+    s.discard(filename)
+    _save_ui_uploads(s)
 
 
 # Intervalle (en secondes) entre deux scans de uploaded_docs/.
@@ -131,6 +176,9 @@ async def upload_specification(file: UploadFile = File(...)):
     # remplacés (re-upload safe).
     n_chunks = add_file_to_index(file_path)
 
+    # Trace l'origine UI pour le filtrage de l'historique côté front.
+    _register_ui_upload(file.filename)
+
     return {
         "message": f"{file.filename} uploadé et indexé ({n_chunks} chunk(s))"
     }
@@ -152,13 +200,27 @@ def _safe_filename(name: str) -> str:
 
 @app.get("/specifications")
 def list_specifications():
-    """Liste les fichiers actuellement présents dans uploaded_docs/."""
+    """
+    Liste les fichiers actuellement présents dans uploaded_docs/.
+
+    Chaque entrée porte un flag `ui_uploaded` :
+      - True  → fichier ajouté via l'interface UI (présent dans le registre)
+      - False → fichier ajouté à la main dans uploaded_docs/ (indexé via
+                le watcher, mais invisible dans l'historique UI)
+
+    Auto-cleanup : si le registre référence un fichier qui n'existe plus
+    sur disque, on retire silencieusement l'entrée du registre.
+    """
     if not UPLOAD_DIR.exists():
         return []
+
+    ui_set = _load_ui_uploads()
+    on_disk: set[str] = set()
     items = []
     for p in sorted(UPLOAD_DIR.iterdir()):
         if not p.is_file() or p.suffix.lower() not in SUPPORTED_EXTS:
             continue
+        on_disk.add(p.name)
         stat = p.stat()
         items.append({
             "name": p.name,
@@ -166,7 +228,15 @@ def list_specifications():
             "uploaded_at": datetime.fromtimestamp(
                 stat.st_mtime, tz=timezone.utc
             ).isoformat(),
+            "ui_uploaded": p.name in ui_set,
         })
+
+    # Auto-cleanup : on retire du registre les fichiers qui ne sont
+    # plus sur disque (suppression manuelle, déplacement, etc.)
+    stale = ui_set - on_disk
+    if stale:
+        _save_ui_uploads(ui_set - stale)
+
     return items
 
 
@@ -183,6 +253,9 @@ def delete_specification(filename: str):
     # Suppression INCRÉMENTALE : on retire uniquement les chunks de ce
     # fichier, le reste de l'index est intact.
     n_removed = remove_file_from_index(safe)
+
+    # Retire du registre UI (no-op si le fichier n'y était pas).
+    _unregister_ui_upload(safe)
 
     return {
         "status": "success",
