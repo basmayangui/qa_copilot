@@ -18,6 +18,50 @@ class AgentState(TypedDict, total=False):
     input: str
     context: str
     output: str
+    detail_level: str  # "standard" | "avance" | "expert"
+
+
+# Consignes spécifiques par niveau de détail. Le LLM les reçoit
+# inline dans le prompt, en plus de la spécification et du contexte RAG.
+DETAIL_LEVEL_INSTRUCTIONS = {
+    "standard": (
+        "Niveau de détail attendu : STANDARD.\n"
+        "- Génère entre 5 et 8 scénarios.\n"
+        "- Couvre les chemins nominaux (happy paths) et les cas d'usage "
+        "principaux.\n"
+        "- Pas de tags Gherkin avancés, pas de Scenario Outline, pas de "
+        "Background sauf nécessité évidente.\n"
+        "- Style clair et concis, accessible à un non-spécialiste QA."
+    ),
+    "avance": (
+        "Niveau de détail attendu : AVANCÉ.\n"
+        "- Génère entre 10 et 15 scénarios.\n"
+        "- Inclus en plus des happy paths : les cas d'erreur, les messages "
+        "d'erreur attendus, les valeurs limites (boundary values), et au "
+        "moins un cas de validation d'entrée invalide.\n"
+        "- Utilise des tags Gherkin pour catégoriser : @happy, @error, "
+        "@edge selon les scénarios.\n"
+        "- Tu peux utiliser un Background si plusieurs scénarios partagent "
+        "le même contexte initial."
+    ),
+    "expert": (
+        "Niveau de détail attendu : EXPERT QA.\n"
+        "- Génère une couverture exhaustive : 15 à 25 scénarios.\n"
+        "- Couvre : chemins nominaux et alternatifs, cas d'erreur (avec "
+        "messages et codes retour attendus), valeurs limites et "
+        "équivalence partitionnée, scénarios de sécurité (autorisation, "
+        "injection, accès interdit), cas de performance ou de charge si "
+        "pertinent.\n"
+        "- Utilise des Scenario Outline + Examples pour les cas "
+        "data-driven (paramétrage par jeu de données).\n"
+        "- Utilise des tags riches : @smoke, @regression, @security, "
+        "@perf, @edge, @critical selon le scénario.\n"
+        "- Utilise un Background pour factoriser les pré-conditions "
+        "partagées.\n"
+        "- Précise les pré-conditions techniques quand pertinent."
+    ),
+}
+
 
 def retrieve_node(state: AgentState):
 
@@ -35,23 +79,32 @@ def retrieve_node(state: AgentState):
     }
 
 def generate_gherkin(state: AgentState):
+
+    level = state.get("detail_level", "standard")
+    level_instructions = DETAIL_LEVEL_INSTRUCTIONS.get(
+        level, DETAIL_LEVEL_INSTRUCTIONS["standard"]
+    )
+
     prompt = f"""
     Tu es un expert QA.
 
     Génère des scénarios Gherkin (Given/When/Then)
-    à partir des spécifications suivantes :
+    à partir des spécifications suivantes.
 
-    CONTEXTE:
+    {level_instructions}
+
+    CONTEXTE (extraits issus du RAG) :
     {state.get("context", "")}
 
-    INPUT:
+    SPÉCIFICATION DE L'UTILISATEUR :
     {state.get("input", "")}
 
-    Répond uniquement en Gherkin.
+    Réponds uniquement en Gherkin, en respectant strictement le niveau
+    de détail demandé ci-dessus.
     """
 
     response = llm.invoke(prompt)
-    print("LLM RESPONSE =", response.content)
+    print(f"LLM RESPONSE (level={level}) =", response.content[:200], "...")
     return {"output": response.content}
 
 

@@ -4,12 +4,24 @@ import { ReactNode, useState } from "react";
 import axios from "axios";
 import { Copy, Check, Sparkles, AlertCircle } from "lucide-react";
 
+// Valeurs envoyées au backend (cf. DETAIL_LEVEL_INSTRUCTIONS dans
+// backend/api/gherkin_agent.py). On garde la labellisation FR pour
+// l'utilisateur, mais on envoie un identifiant stable côté API.
+const DETAIL_LEVELS = [
+  { value: "standard", label: "Standard" },
+  { value: "avance", label: "Avancé" },
+  { value: "expert", label: "Expert QA" },
+] as const;
+
+type DetailLevel = (typeof DETAIL_LEVELS)[number]["value"];
+
 export default function TestCasesPage() {
   const [specification, setSpecification] = useState("");
   const [gherkin, setGherkin] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [detailLevel, setDetailLevel] = useState<DetailLevel>("standard");
 
   async function generateGherkin() {
     if (!specification.trim()) {
@@ -24,6 +36,7 @@ export default function TestCasesPage() {
 
       const response = await axios.post("http://localhost:8000/generate", {
         text: specification,
+        detail_level: detailLevel,
       });
 
       setGherkin(response.data.gherkin);
@@ -102,16 +115,32 @@ export default function TestCasesPage() {
                   Niveau de détail
                 </label>
                 <select
+                  value={detailLevel}
+                  onChange={(e) =>
+                    setDetailLevel(e.target.value as DetailLevel)
+                  }
                   className="
                     w-full bg-[#0F172A]
                     border border-[#1E293B]
                     rounded-xl p-4
+                    text-white outline-none
+                    focus:border-[#A855F7]
                   "
                 >
-                  <option>Standard</option>
-                  <option>Avancé</option>
-                  <option>Expert QA</option>
+                  {DETAIL_LEVELS.map((l) => (
+                    <option key={l.value} value={l.value}>
+                      {l.label}
+                    </option>
+                  ))}
                 </select>
+                <p className="mt-2 text-xs text-gray-500 italic">
+                  {detailLevel === "standard" &&
+                    "5-8 scénarios — happy paths principaux, style sobre."}
+                  {detailLevel === "avance" &&
+                    "10-15 scénarios — cas d'erreur, valeurs limites, tags @happy/@error/@edge."}
+                  {detailLevel === "expert" &&
+                    "15-25 scénarios — Scenario Outline, Background, tags riches, cas de sécurité."}
+                </p>
               </div>
 
               {error && (
