@@ -101,20 +101,32 @@ qa_copilot/
 └── README.md
 ```
 
-**Flux RAG**
+**Flux RAG** (incrémental)
 
 ```
 Upload PDF/DOCX/TXT
    -> sauvegarde dans uploaded_docs/
-   -> rebuild_rag()
-        -> shutil.rmtree(chroma_db/)
-        -> relecture de tous les fichiers
-        -> chunking (1000 chars / 200 overlap)
-        -> embeddings OpenAI
-        -> réindexation Chroma (collection "expersi_qa")
-        -> écriture du manifeste {fichier: mtime}
-   -> LangGraph utilise immédiatement l'index courant
+   -> add_file_to_index(fichier)
+        -> suppression d'éventuels chunks précédents (re-upload safe)
+        -> chargement + chunking du fichier (1000 chars / 200 overlap)
+        -> embeddings OpenAI + ajout à Chroma existant
+        -> mise à jour du manifeste pour ce fichier
+   -> LangGraph utilise immédiatement l'index enrichi
+
+Suppression d'un fichier
+   -> remove_file_from_index(fichier)
+        -> delete des chunks où metadata.source_filename == fichier
+        -> mise à jour du manifeste
+   -> Aucun rebuild complet, le reste de l'index est intact
 ```
+
+Un **rebuild COMPLET** (wipe + réindex parallélisé en Phase 1 / chunking / batches d'embedding) n'est déclenché que dans trois cas :
+
+- Changement de `RAG_EMBED_MODEL` (les vecteurs existants deviennent incompatibles)
+- Premier démarrage sans index
+- Index Chroma physiquement absent ou corrompu
+
+Au démarrage normal, le bootstrap compare le manifeste sauvegardé au contenu réel de `uploaded_docs/` et applique uniquement les **diffs** (ajouts / suppressions / modifications) de façon incrémentale.
 
 ---
 
@@ -161,9 +173,29 @@ Créer le fichier `backend/.env` :
 ```env
 OPENAI_API_KEY=sk-...
 
-# Optionnel — intervalle (en secondes) entre deux scans automatiques de uploaded_docs/
+# --- Pipeline RAG (toutes ces variables sont optionnelles) ---
+
+# Modèle d'embedding OpenAI.
+#   text-embedding-3-small : 5x plus rapide que ada-002, recommandé (défaut)
+#   text-embedding-3-large : qualité maximale, plus cher
+#   text-embedding-ada-002 : ancien modèle
+# Tout changement déclenche un rebuild complet automatique au démarrage.
+RAG_EMBED_MODEL=text-embedding-3-small
+
+# Nombre de chunks envoyés par batch à OpenAI embeddings.
+RAG_EMBED_BATCH_SIZE=256
+
+# Pause (secondes) entre deux batches pour ménager le TPM OpenAI.
+RAG_EMBED_BATCH_PAUSE_SEC=0.1
+
+# Threads pour le chargement parallèle des fichiers (Phase 1 du rebuild).
+RAG_LOAD_MAX_WORKERS=8
+
+# Intervalle (secondes) entre deux scans automatiques de uploaded_docs/.
 RAG_WATCH_INTERVAL_SEC=30
 ```
+
+**Note** : un changement de `RAG_EMBED_MODEL` est détecté automatiquement (le nom du modèle est inclus dans `chroma_db/.manifest.json`) et déclenche un rebuild complet au prochain démarrage.
 
 ### Frontend — `frontend/.env.local` (optionnel)
 
@@ -232,13 +264,15 @@ L'application est accessible sur **http://localhost:3000**.
 
 ### Embeddings
 
-`OpenAIEmbeddings()` (modèle par défaut `text-embedding-ada-002`, 1536 dimensions). Pour passer au modèle moderne :
+`OpenAIEmbeddings` avec `text-embedding-3-small` par défaut (1536 dimensions, plus rapide et moins cher que `ada-002`). Le modèle est piloté par la variable `RAG_EMBED_MODEL` dans `backend/.env`.
 
-```python
-embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
-```
+Le nom du modèle est inclus dans `chroma_db/.manifest.json` : tout changement déclenche un rebuild complet automatique au prochain démarrage, sans intervention manuelle.
 
-et supprimer `chroma_db/` pour reconstruire avec les nouveaux vecteurs.
+### Chargement des PDF
+
+`PyPDFium2Loader` (basé sur Google PDFium, en C++) est utilisé à la place de `PyPDFLoader` (pypdf, Python pur). C'est **3-5× plus rapide** sur les gros corpus, avec la même API et le même format de métadonnées.
+
+La Phase 1 (parsing) est en plus parallélisée via `ProcessPoolExecutor` — pas `ThreadPoolExecutor` — pour contourner le GIL Python : pypdfium2 reste partiellement CPU-bound côté Python. Le nombre de workers est piloté par `RAG_LOAD_MAX_WORKERS` (défaut : `cpu_count() - 1`).
 
 ### Retrieval
 
@@ -252,14 +286,24 @@ Tout l'index vectoriel vit dans le dossier **`backend/chroma_db/`**, sur le disq
 
 L'intérêt : tant que ce dossier existe, le RAG est disponible immédiatement au redémarrage du backend, sans avoir à ré-embedder les fichiers. Si on supprime le dossier, il sera reconstruit automatiquement au prochain démarrage à partir des fichiers présents dans `uploaded_docs/`.
 
-### Détection des changements
+### Indexation incrémentale
 
-Un fichier `chroma_db/.manifest.json` contient un snapshot `{filename: mtime}` du contenu indexé. Au démarrage et toutes les `RAG_WATCH_INTERVAL_SEC` secondes, on compare le contenu de `uploaded_docs/` au manifeste :
+Chaque chunk indexé porte une métadonnée `source_filename`. Cela permet d'ajouter ou de retirer un fichier de l'index sans toucher au reste :
+
+- **Upload via l'API** → `add_file_to_index(fichier)` : charge ce seul fichier, l'embedde, l'ajoute à Chroma. Si une version précédente existait, ses chunks sont supprimés d'abord (re-upload safe).
+- **Suppression via l'API** → `remove_file_from_index(fichier)` : `delete(where={"source_filename": fichier})` sur la collection Chroma, puis mise à jour du manifeste.
+
+Un **rebuild complet** ne reste utile que pour : changement du modèle d'embedding, premier démarrage, ou index physiquement absent.
+
+### Détection des changements disque
+
+Un fichier `chroma_db/.manifest.json` contient `{embed_model, files: {filename: mtime}}`. Au démarrage et toutes les `RAG_WATCH_INTERVAL_SEC` secondes, on compare ce manifeste au contenu réel de `uploaded_docs/` :
 
 - **Aucun changement** → rien à faire.
-- **Ajout / suppression / modification détectée** → `rebuild_rag()` complet.
+- **Diff (ajouts / suppressions / modifs)** → on applique les diffs de manière **incrémentale** (un `add_file_to_index` ou `remove_file_from_index` par fichier concerné), pas de rebuild complet.
+- **Modèle d'embedding changé** → rebuild COMPLET (les vecteurs ne sont plus compatibles).
 
-Ce mécanisme couvre les ajouts de fichiers à la main, sans passer par l'API.
+Ce mécanisme couvre les ajouts de fichiers à la main dans `uploaded_docs/`, sans passer par l'API.
 
 ---
 
