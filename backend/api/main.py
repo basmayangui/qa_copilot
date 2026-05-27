@@ -124,6 +124,9 @@ app.add_middleware(
 
 class SpecRequest(BaseModel):
     text: str
+    # Niveau de détail attendu sur la génération Gherkin.
+    # Valeurs : "standard" | "avance" | "expert" (cf. gherkin_agent.py)
+    detail_level: str = "standard"
 
 
 class ChatMessage(BaseModel):
@@ -148,7 +151,8 @@ def ingest(req: SpecRequest):
 def generate(req: SpecRequest):
 
     result = app_graph.invoke({
-        "input": req.text
+        "input": req.text,
+        "detail_level": req.detail_level,
     })
 
     print("GRAPH RESULT =", result)
