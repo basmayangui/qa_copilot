@@ -8,6 +8,7 @@ backend/__pycache__/
 backend/chroma_db/
 backend/uploaded_docs/
 backend/.ui_uploads.json
+backend/.validated_test_cases.json
 
 # PYTHON
 *.pyc
