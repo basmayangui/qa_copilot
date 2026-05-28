@@ -16,6 +16,13 @@ from api.rag.vector_store import (
     add_file_to_index,
     remove_file_from_index,
 )
+from api.test_cases import (
+    list_test_cases,
+    get_test_case,
+    create_test_case,
+    update_test_case,
+    delete_test_case,
+)
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -391,3 +398,59 @@ def chat(req: ChatRequest):
         "reply": response.content,
         "used_rag": bool(context),
     }
+
+
+# ------------------------------------------------------------------
+# Cas de test validés — CRUD
+# ------------------------------------------------------------------
+class TestCaseCreate(BaseModel):
+    title: str
+    gherkin: str
+    tags: list[str] = []
+    source_spec: str = ""
+    detail_level: str = "standard"
+    feature: str = ""
+
+
+class TestCaseUpdate(BaseModel):
+    title: str | None = None
+    tags: list[str] | None = None
+    gherkin: str | None = None
+
+
+@app.get("/test-cases")
+def get_test_cases_route():
+    """Liste tous les cas de test validés, du plus récent au plus ancien."""
+    return list_test_cases()
+
+
+@app.get("/test-cases/{tc_id}")
+def get_test_case_route(tc_id: str):
+    tc = get_test_case(tc_id)
+    if tc is None:
+        raise HTTPException(status_code=404, detail="Cas de test introuvable")
+    return tc
+
+
+@app.post("/test-cases")
+def create_test_case_route(payload: TestCaseCreate):
+    """Enregistre un cas de test validé. Renvoie le cas avec son ID."""
+    return create_test_case(payload.model_dump())
+
+
+@app.patch("/test-cases/{tc_id}")
+def update_test_case_route(tc_id: str, payload: TestCaseUpdate):
+    """Met à jour partiellement un cas de test (title, tags, gherkin)."""
+    updated = update_test_case(
+        tc_id, payload.model_dump(exclude_none=True)
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Cas de test introuvable")
+    return updated
+
+
+@app.delete("/test-cases/{tc_id}")
+def delete_test_case_route(tc_id: str):
+    if not delete_test_case(tc_id):
+        raise HTTPException(status_code=404, detail="Cas de test introuvable")
+    return {"status": "ok", "id": tc_id}
