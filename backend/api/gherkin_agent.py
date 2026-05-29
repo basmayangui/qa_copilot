@@ -12,6 +12,10 @@ load_dotenv() ## loading all the environment variable
 
 os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
 
+# Config LLM minimale : on évite max_tokens et temperature qui peuvent
+# être incompatibles avec certaines variantes de gpt-5-nano (modèles
+# "reasoning" qui consomment leur budget en réflexion interne et
+# n'émettent rien de visible si on les contraint trop).
 llm = ChatOpenAI(model="gpt-5-nano")
 
 class AgentState(TypedDict, total=False):
@@ -19,6 +23,54 @@ class AgentState(TypedDict, total=False):
     context: str
     output: str
     detail_level: str  # "standard" | "avance" | "expert"
+    test_type: str     # "fonctionnels" | "non_regression" | "performance" | "stress"
+    project_name: str
+
+
+# Consignes spécifiques par TYPE de tests. Chaque type oriente le LLM
+# vers un style de scénarios très différent.
+TEST_TYPE_INSTRUCTIONS = {
+    "fonctionnels": (
+        "Type de tests : FONCTIONNELS.\n"
+        "Génère des scénarios qui valident le comportement métier : "
+        "user flows nominaux, règles de validation, transitions d'état, "
+        "vérifications des écrans et messages. C'est le mode par défaut, "
+        "centré sur 'le système fait-il ce qu'il est censé faire ?'."
+    ),
+    "non_regression": (
+        "Type de tests : NON-RÉGRESSION.\n"
+        "Génère des scénarios qui couvrent les CHEMINS CRITIQUES qu'il "
+        "ne faut PAS casser entre deux versions. Concentre-toi sur :\n"
+        "- les fonctionnalités les plus utilisées (parcours principaux)\n"
+        "- les règles métier sensibles (calculs, autorisations, totaux)\n"
+        "- les intégrations clés\n"
+        "Tague chaque scénario avec @regression et @critical pour qu'ils "
+        "soient pris en compte par la CI à chaque livraison."
+    ),
+    "performance": (
+        "Type de tests : PERFORMANCE.\n"
+        "Génère des scénarios mesurant la performance : temps de réponse, "
+        "débit, scalabilité. Chaque scénario doit inclure des ASSERTIONS "
+        "DE SEUIL explicites, par exemple :\n"
+        "  Then le temps de réponse est inférieur à 2 secondes\n"
+        "  Then le système traite au moins 500 requêtes par seconde\n"
+        "Précise les pré-conditions de charge (ex : 'Étant donné 100 "
+        "utilisateurs simultanés'). Tague avec @perf, et précise le seuil "
+        "métier ciblé quand pertinent (@p95, @p99)."
+    ),
+    "stress": (
+        "Type de tests : STRESS.\n"
+        "Génère des scénarios qui poussent le système à ses LIMITES "
+        "et au-delà :\n"
+        "- charge extrême (10x la nominale)\n"
+        "- ressources saturées (mémoire, connexions, disque)\n"
+        "- pics soutenus dans le temps\n"
+        "- conditions de dégradation (réseau lent, dépendance indisponible)\n"
+        "Vérifie que le système dégrade ÉLÉGAMMENT (file d'attente, "
+        "circuit breaker, message d'erreur clair) plutôt que de crasher. "
+        "Tague avec @stress, @perf, et @edge."
+    ),
+}
 
 
 # Consignes spécifiques par niveau de détail. Le LLM les reçoit
@@ -81,31 +133,90 @@ def retrieve_node(state: AgentState):
 def generate_gherkin(state: AgentState):
 
     level = state.get("detail_level", "standard")
+    test_type = state.get("test_type", "fonctionnels")
+    project_name = state.get("project_name") or state.get("input", "")
+
     level_instructions = DETAIL_LEVEL_INSTRUCTIONS.get(
         level, DETAIL_LEVEL_INSTRUCTIONS["standard"]
+    )
+    type_instructions = TEST_TYPE_INSTRUCTIONS.get(
+        test_type, TEST_TYPE_INSTRUCTIONS["fonctionnels"]
     )
 
     prompt = f"""
     Tu es un expert QA.
 
-    Génère des scénarios Gherkin (Given/When/Then)
-    à partir des spécifications suivantes.
+    Génère des scénarios Gherkin (Given/When/Then) pour le projet
+    suivant, en t'appuyant sur les extraits de spécifications fournis.
+
+    RÈGLES IMPORTANTES DE FORMAT (à respecter STRICTEMENT) :
+    - Utilise IMPÉRATIVEMENT les mots-clés Gherkin EN ANGLAIS :
+      Feature, Background, Scenario, Scenario Outline, Examples,
+      Given, When, Then, And, But.
+    - Chaque scénario DOIT commencer EXACTEMENT par "Scenario: " (avec
+      les deux-points et un espace) suivi du titre. Exemple :
+        Scenario: Connexion réussie
+      JAMAIS "Scenario Connexion réussie" sans deux-points.
+      Idem pour "Scenario Outline: Titre", "Feature: Titre",
+      "Background:", "Examples:".
+    - Les tags (@perf, @critical, etc.) doivent être placés sur la
+      ligne JUSTE AVANT "Scenario:", JAMAIS après. Exemple :
+        @perf @critical
+        Scenario: Titre
+          Given ...
+    - Le contenu (titres, descriptions, étapes) peut être en français.
+    - Ne mets PAS de bloc markdown ```gherkin ... ``` autour du résultat,
+      renvoie le Gherkin brut directement.
+
+    PROJET : {project_name}
+
+    {type_instructions}
 
     {level_instructions}
 
-    CONTEXTE (extraits issus du RAG) :
+    CONTEXTE (extraits issus du RAG, recherchés à partir du nom du projet) :
     {state.get("context", "")}
 
-    SPÉCIFICATION DE L'UTILISATEUR :
-    {state.get("input", "")}
-
-    Réponds uniquement en Gherkin, en respectant strictement le niveau
-    de détail demandé ci-dessus.
+    Réponds uniquement en Gherkin, en respectant strictement le TYPE de
+    tests et le NIVEAU de détail demandés ci-dessus. Si le contexte RAG
+    semble pauvre ou non pertinent, base-toi sur ta connaissance générale
+    en QA pour générer des cas plausibles autour de "{project_name}".
     """
 
-    response = llm.invoke(prompt)
-    print(f"LLM RESPONSE (level={level}) =", response.content[:200], "...")
-    return {"output": response.content}
+    try:
+        response = llm.invoke(prompt)
+    except Exception as exc:  # noqa: BLE001
+        # On loggue précisément l'erreur côté backend, et on renvoie un
+        # texte explicite côté client plutôt que de planter le graph.
+        print(
+            f"[gherkin_agent] ECHEC LLM (project={project_name!r}, "
+            f"type={test_type}, level={level}) : {exc}"
+        )
+        return {
+            "output": (
+                f"# Erreur LLM : {exc}\n"
+                "# (consultez les logs uvicorn pour le détail)\n"
+            )
+        }
+
+    content = response.content or ""
+    # Indice utile : si la réponse est suspectement courte ou se finit
+    # sans un step typique, c'est probablement une troncature.
+    stripped = content.rstrip()
+    likely_truncated = (
+        not stripped
+        or not stripped.endswith((".", "\"", "|", ":"))
+        and len(stripped) < 200
+    )
+    print(
+        f"[gherkin_agent] LLM RESPONSE (project={project_name!r}, "
+        f"type={test_type}, level={level}) — "
+        f"{len(content)} chars"
+        f"{' ⚠️  RÉPONSE SUSPECTE (probable troncature)' if likely_truncated else ''}"
+    )
+    print(content[:200].replace("\n", " | "), "...")
+
+    return {"output": content}
 
 
 graph = StateGraph(AgentState)

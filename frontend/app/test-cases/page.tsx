@@ -12,12 +12,14 @@ import {
   Save,
   X,
   Loader2,
+  Minus,
 } from "lucide-react";
 import {
   parseGherkin,
   saveTestCase,
   type DetailLevel,
   type ParsedScenario,
+  type TestType,
 } from "@/lib/test-cases";
 
 // Valeurs envoyées au backend (cf. DETAIL_LEVEL_INSTRUCTIONS dans
@@ -29,25 +31,39 @@ const DETAIL_LEVELS = [
   { value: "expert" as DetailLevel, label: "Expert QA" },
 ] as const;
 
-// Clé localStorage de persistance — change la version si on modifie
-// la forme du draft (les drafts anciens seront alors ignorés).
-const DRAFT_STORAGE_KEY = "expersi.test-cases.draft.v1";
+// Types de tests proposés à l'utilisateur. Les identifiants doivent
+// matcher les clés de TEST_TYPE_INSTRUCTIONS dans gherkin_agent.py.
+const TEST_TYPES = [
+  { value: "fonctionnels" as TestType, label: "Fonctionnels" },
+  { value: "non_regression" as TestType, label: "Non-régression" },
+  { value: "performance" as TestType, label: "Performance" },
+  { value: "stress" as TestType, label: "Stress" },
+] as const;
+
+// Clé localStorage de persistance — v2 = nouveau shape (projectName /
+// testType au lieu de specification). Les drafts v1 sont ignorés.
+const DRAFT_STORAGE_KEY = "expersi.test-cases.draft.v2";
 
 type StoredDraft = {
-  specification: string;
-  gherkin: string;
+  projectName: string;
+  testType: TestType;
   detailLevel: DetailLevel;
+  gherkin: string;
   scenarioText: Record<string, string>;
   validatedMap: Record<string, string>;
 };
 
 export default function TestCasesPage() {
-  const [specification, setSpecification] = useState("");
+  // Critères de génération
+  const [projectName, setProjectName] = useState("");
+  const [testType, setTestType] = useState<TestType>("fonctionnels");
+  const [detailLevel, setDetailLevel] = useState<DetailLevel>("standard");
+
   const [gherkin, setGherkin] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
-  const [detailLevel, setDetailLevel] = useState<DetailLevel>("standard");
+  const [showRaw, setShowRaw] = useState(false);
 
   // --- États pour la validation/édition par scénario ---
   // Map clientId → texte courant (peut diverger du parser après édition).
@@ -82,14 +98,17 @@ export default function TestCasesPage() {
       const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
       if (raw) {
         const data = JSON.parse(raw) as Partial<StoredDraft>;
-        if (typeof data.specification === "string") {
-          setSpecification(data.specification);
+        if (typeof data.projectName === "string") {
+          setProjectName(data.projectName);
         }
-        if (typeof data.gherkin === "string") {
-          setGherkin(data.gherkin);
+        if (data.testType) {
+          setTestType(data.testType);
         }
         if (data.detailLevel) {
           setDetailLevel(data.detailLevel);
+        }
+        if (typeof data.gherkin === "string") {
+          setGherkin(data.gherkin);
         }
         if (data.scenarioText && typeof data.scenarioText === "object") {
           setScenarioText(data.scenarioText);
@@ -108,13 +127,11 @@ export default function TestCasesPage() {
   useEffect(() => {
     if (!hydratedRef.current) return;
 
-    // Garde-fou : ne JAMAIS écrire un draft entièrement vide. Sans ça,
-    // l'effet de persistance peut être déclenché juste après l'hydratation
-    // avec encore la closure du state vide initial (race React), ce qui
-    // efface le draft qu'on vient de charger. Si tout est vide, on n'a
-    // de toute façon rien à sauvegarder.
+    // Garde-fou : ne JAMAIS écrire un draft entièrement vide. Voir
+    // commentaire dans la version précédente — évite la race React
+    // qui effacerait le draft fraîchement hydraté.
     const isEmpty =
-      !specification.trim() &&
+      !projectName.trim() &&
       !gherkin.trim() &&
       Object.keys(scenarioText).length === 0 &&
       Object.keys(validatedMap).length === 0;
@@ -122,9 +139,10 @@ export default function TestCasesPage() {
 
     try {
       const draft: StoredDraft = {
-        specification,
-        gherkin,
+        projectName,
+        testType,
         detailLevel,
+        gherkin,
         scenarioText,
         validatedMap,
       };
@@ -132,7 +150,7 @@ export default function TestCasesPage() {
     } catch {
       /* quota dépassé ou localStorage indispo — on ignore */
     }
-  }, [specification, gherkin, detailLevel, scenarioText, validatedMap]);
+  }, [projectName, testType, detailLevel, gherkin, scenarioText, validatedMap]);
 
   // Parse mémoïsé sur la sortie LLM courante.
   const parsed = useMemo(
@@ -180,10 +198,14 @@ export default function TestCasesPage() {
       const saved = await saveTestCase({
         title: extractTitleFromBlock(currentText) || s.title,
         gherkin: currentText,
-        tags: extractTagsFromBlock(currentText),
-        source_spec: specification.slice(0, 4000),
+        // tags viennent du parser (déjà consolidés), pas du body
+        // (qui ne les contient plus depuis le strip).
+        tags: s.tags,
+        source_spec: projectName,
         detail_level: detailLevel,
-        feature: parsed?.feature ?? "",
+        feature: parsed?.feature ?? projectName,
+        project_name: projectName,
+        test_type: testType,
       });
       setValidatedMap((prev) => ({ ...prev, [s.clientId]: saved.id }));
       // retire ce scénario de la sélection s'il y était
@@ -216,7 +238,12 @@ export default function TestCasesPage() {
   function selectAllUnvalidated() {
     if (!parsed) return;
     const ids = parsed.scenarios
-      .filter((s) => !validatedMap[s.clientId])
+      .filter((s) => {
+        if (validatedMap[s.clientId]) return false;
+        // on évite de cocher les scénarios incomplets (tronqués)
+        const text = scenarioText[s.clientId] ?? s.rawText;
+        return hasSteps(text);
+      })
       .map((s) => s.clientId);
     setSelectedIds(new Set(ids));
   }
@@ -237,19 +264,28 @@ export default function TestCasesPage() {
     setBulkProgress({ done: 0, total: ids.length });
 
     let errorCount = 0;
+    let skippedCount = 0;
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
       const s = parsed.scenarios.find((x) => x.clientId === id);
       if (!s) continue;
       const currentText = scenarioText[id] ?? s.rawText;
+      // Skip silencieusement les scénarios sans steps (tronqués).
+      if (!hasSteps(currentText)) {
+        skippedCount++;
+        setBulkProgress({ done: i + 1, total: ids.length });
+        continue;
+      }
       try {
         const saved = await saveTestCase({
           title: extractTitleFromBlock(currentText) || s.title,
           gherkin: currentText,
-          tags: extractTagsFromBlock(currentText),
-          source_spec: specification.slice(0, 4000),
+          tags: s.tags,
+          source_spec: projectName,
           detail_level: detailLevel,
-          feature: parsed.feature ?? "",
+          feature: parsed.feature ?? projectName,
+          project_name: projectName,
+          test_type: testType,
         });
         // Mise à jour incrémentale pour que l'utilisateur voie la
         // progression scénario par scénario.
@@ -269,16 +305,18 @@ export default function TestCasesPage() {
 
     setBulkSaving(false);
     setBulkProgress(null);
-    if (errorCount > 0) {
-      setError(
-        `${errorCount} validation(s) en erreur sur ${ids.length}.`,
-      );
+    if (errorCount > 0 || skippedCount > 0) {
+      const parts: string[] = [];
+      if (errorCount > 0) parts.push(`${errorCount} en erreur`);
+      if (skippedCount > 0)
+        parts.push(`${skippedCount} ignoré(s) (scénarios incomplets)`);
+      setError(`Sur ${ids.length} : ${parts.join(" · ")}.`);
     }
   }
 
   async function generateGherkin() {
-    if (!specification.trim()) {
-      setError("Veuillez saisir une spécification.");
+    if (!projectName.trim()) {
+      setError("Veuillez saisir un nom de projet.");
       return;
     }
 
@@ -288,11 +326,24 @@ export default function TestCasesPage() {
       setGherkin("");
 
       const response = await axios.post("http://localhost:8000/generate", {
-        text: specification,
+        project_name: projectName,
+        test_type: testType,
         detail_level: detailLevel,
       });
 
-      const newGherkin = response.data.gherkin ?? "";
+      let newGherkin: string = response.data.gherkin ?? "";
+      // Diagnostic défensif : si le backend renvoie une réponse vide,
+      // on injecte un commentaire visible pour ne pas afficher
+      // l'écran de bienvenue (qui ferait croire qu'il ne s'est rien passé).
+      if (!newGherkin.trim()) {
+        newGherkin =
+          "# ⚠ Le LLM a renvoyé une réponse vide.\n" +
+          "# Vérifie le terminal uvicorn — la ligne\n" +
+          "#   [gherkin_agent] LLM RESPONSE (project=..., type=..., level=...) — N chars\n" +
+          "# indique combien de caractères ont été reçus.\n" +
+          "# Si N=0, le modèle (gpt-5-nano) a refusé ou consommé son budget en\n" +
+          "# raisonnement interne sans émettre de texte visible.";
+      }
       setGherkin(newGherkin);
       // reset des états de validation/édition pour la nouvelle sortie
       const newParsed = newGherkin ? parseGherkin(newGherkin) : null;
@@ -322,112 +373,145 @@ export default function TestCasesPage() {
         </p>
       </div>
 
-      {/* Main Card */}
+      {/* Critères de génération */}
       <div className="border border-[#1B1F35] rounded-3xl bg-[#0A1020] p-8">
-        <div className="grid grid-cols-2 gap-10">
-          {/* LEFT */}
-          <div>
-            <h2 className="text-2xl font-semibold mb-6">
-              Spécification fonctionnelle
-            </h2>
+        <h2 className="text-2xl font-semibold mb-6">
+          Critères de génération
+        </h2>
 
-            <textarea
-              value={specification}
-              onChange={(e) => setSpecification(e.target.value)}
-              placeholder="Collez votre spécification fonctionnelle ici..."
+        <div className="space-y-6">
+          {/* Nom du projet */}
+          <div>
+            <label
+              htmlFor="project-name"
+              className="block mb-2 text-gray-400"
+            >
+              Nom du projet
+            </label>
+            <input
+              id="project-name"
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              placeholder="Ex : Paiement, Authentification, Panier..."
               className="
-                w-full h-[350px]
-                bg-[#0F172A]
+                w-full bg-[#0F172A]
                 border border-[#1E293B]
-                rounded-2xl p-5
-                text-white resize-none outline-none
+                rounded-xl p-4
+                text-white outline-none
                 focus:border-[#A855F7]
+                placeholder:text-gray-500
               "
             />
+            <p className="mt-2 text-xs text-gray-500 italic">
+              Sert à la fois de nom de projet pour vos cas validés et de
+              requête pour le RAG : le LLM récupère automatiquement les
+              extraits de specs liés à ce projet.
+            </p>
           </div>
 
-          {/* RIGHT */}
-          <div>
-            <h2 className="text-2xl font-semibold mb-6">
-              Paramètres de génération
-            </h2>
-
-            <div className="space-y-6">
-              <div>
-                <label className="block mb-2 text-gray-400">Langue</label>
-                <select
-                  className="
-                    w-full bg-[#0F172A]
-                    border border-[#1E293B]
-                    rounded-xl p-4
-                  "
-                >
-                  <option>Français</option>
-                  <option>English</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block mb-2 text-gray-400">
-                  Niveau de détail
-                </label>
-                <select
-                  value={detailLevel}
-                  onChange={(e) =>
-                    setDetailLevel(e.target.value as DetailLevel)
-                  }
-                  className="
-                    w-full bg-[#0F172A]
-                    border border-[#1E293B]
-                    rounded-xl p-4
-                    text-white outline-none
-                    focus:border-[#A855F7]
-                  "
-                >
-                  {DETAIL_LEVELS.map((l) => (
-                    <option key={l.value} value={l.value}>
-                      {l.label}
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-2 text-xs text-gray-500 italic">
-                  {detailLevel === "standard" &&
-                    "5-8 scénarios — happy paths principaux, style sobre."}
-                  {detailLevel === "avance" &&
-                    "10-15 scénarios — cas d'erreur, valeurs limites, tags @happy/@error/@edge."}
-                  {detailLevel === "expert" &&
-                    "15-25 scénarios — Scenario Outline, Background, tags riches, cas de sécurité."}
-                </p>
-              </div>
-
-              {error && (
-                <div
-                  className="
-                    bg-red-500/10 border border-red-500
-                    text-red-400 rounded-xl p-4
-                    flex items-center gap-2
-                  "
-                >
-                  <AlertCircle size={18} /> {error}
-                </div>
-              )}
-
-              <button
-                onClick={generateGherkin}
-                disabled={loading}
+          {/* Type + Niveau côte à côte */}
+          <div className="grid grid-cols-2 gap-6">
+            <div>
+              <label
+                htmlFor="test-type"
+                className="block mb-2 text-gray-400"
+              >
+                Type de tests
+              </label>
+              <select
+                id="test-type"
+                value={testType}
+                onChange={(e) => setTestType(e.target.value as TestType)}
                 className="
-                  w-full mt-8 py-4 rounded-2xl text-lg font-semibold
-                  bg-gradient-to-r from-[#7C3AED] via-[#C026D3] to-[#F59E0B]
-                  hover:opacity-90 transition
-                  disabled:opacity-50
-                  flex items-center justify-center gap-2
+                  w-full bg-[#0F172A]
+                  border border-[#1E293B]
+                  rounded-xl p-4
+                  text-white outline-none
+                  focus:border-[#A855F7]
                 "
               >
-                <Sparkles size={20} />
-                {loading ? "Génération en cours..." : "Générer les scénarios"}
-              </button>
+                {TEST_TYPES.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-2 text-xs text-gray-500 italic">
+                {testType === "fonctionnels" &&
+                  "User flows, règles métier, validations."}
+                {testType === "non_regression" &&
+                  "Chemins critiques à protéger entre versions (tags @critical, @regression)."}
+                {testType === "performance" &&
+                  "Temps de réponse, débit, scalabilité avec assertions de seuils."}
+                {testType === "stress" &&
+                  "Limites du système : charge extrême, ressources saturées."}
+              </p>
+            </div>
+
+            <div>
+              <label
+                htmlFor="detail-level"
+                className="block mb-2 text-gray-400"
+              >
+                Niveau de détail
+              </label>
+              <select
+                id="detail-level"
+                value={detailLevel}
+                onChange={(e) =>
+                  setDetailLevel(e.target.value as DetailLevel)
+                }
+                className="
+                  w-full bg-[#0F172A]
+                  border border-[#1E293B]
+                  rounded-xl p-4
+                  text-white outline-none
+                  focus:border-[#A855F7]
+                "
+              >
+                {DETAIL_LEVELS.map((l) => (
+                  <option key={l.value} value={l.value}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-2 text-xs text-gray-500 italic">
+                {detailLevel === "standard" &&
+                  "5-8 scénarios — sobre."}
+                {detailLevel === "avance" &&
+                  "10-15 scénarios — cas d'erreur + valeurs limites."}
+                {detailLevel === "expert" &&
+                  "15-25 scénarios — Scenario Outline, Background, tags riches."}
+              </p>
             </div>
           </div>
+
+          {error && (
+            <div
+              className="
+                bg-red-500/10 border border-red-500
+                text-red-400 rounded-xl p-4
+                flex items-center gap-2
+              "
+            >
+              <AlertCircle size={18} /> {error}
+            </div>
+          )}
+
+          <button
+            onClick={generateGherkin}
+            disabled={loading}
+            className="
+              w-full mt-4 py-4 rounded-2xl text-lg font-semibold
+              bg-gradient-to-r from-[#7C3AED] via-[#C026D3] to-[#F59E0B]
+              hover:opacity-90 transition
+              disabled:opacity-50
+              flex items-center justify-center gap-2
+            "
+          >
+            <Sparkles size={20} />
+            {loading ? "Génération en cours..." : "Générer les scénarios"}
+          </button>
         </div>
       </div>
 
@@ -458,27 +542,69 @@ export default function TestCasesPage() {
           </div>
 
           {gherkin && (
-            <button
-              onClick={handleCopy}
-              className="
-                px-4 py-2 rounded-xl
-                border border-[#334155]
-                hover:bg-[#111827] transition
-                flex items-center gap-2 text-sm
-              "
-            >
-              {copied ? (
-                <>
-                  <Check size={16} className="text-emerald-400" /> Copié
-                </>
-              ) : (
-                <>
-                  <Copy size={16} /> Copier tout
-                </>
-              )}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowRaw((v) => !v)}
+                title="Affiche la réponse brute du LLM, utile pour diagnostiquer un parsing incomplet"
+                className={`
+                  px-4 py-2 rounded-xl text-sm transition
+                  flex items-center gap-2
+                  ${
+                    showRaw
+                      ? "bg-[#7C3AED]/20 border border-[#7C3AED] text-[#E9D5FF]"
+                      : "border border-[#334155] hover:bg-[#111827]"
+                  }
+                `}
+              >
+                {showRaw ? "Masquer brut" : "Voir brut"}
+              </button>
+              <button
+                onClick={handleCopy}
+                className="
+                  px-4 py-2 rounded-xl
+                  border border-[#334155]
+                  hover:bg-[#111827] transition
+                  flex items-center gap-2 text-sm
+                "
+              >
+                {copied ? (
+                  <>
+                    <Check size={16} className="text-emerald-400" /> Copié
+                  </>
+                ) : (
+                  <>
+                    <Copy size={16} /> Copier tout
+                  </>
+                )}
+              </button>
+            </div>
           )}
         </div>
+
+        {/* Réponse brute du LLM — toggle utile pour diagnostiquer */}
+        {showRaw && gherkin && (
+          <details
+            open
+            className="
+              mb-5 border border-[#7C3AED]/40 rounded-2xl
+              bg-[#050816] overflow-hidden
+            "
+          >
+            <summary className="
+              px-4 py-2 cursor-pointer text-xs text-[#E9D5FF]
+              bg-[#7C3AED]/10 border-b border-[#7C3AED]/40
+            ">
+              Réponse brute du LLM — {gherkin.length} caractères
+            </summary>
+            <pre className="
+              font-mono text-[12.5px] leading-6 p-4
+              text-gray-200 whitespace-pre-wrap break-words
+              overflow-auto max-h-[500px]
+            ">
+              {gherkin}
+            </pre>
+          </details>
+        )}
 
         {!gherkin && !loading && (
           <div className="flex items-center justify-center h-[250px] text-gray-500 text-xl">
@@ -503,21 +629,53 @@ export default function TestCasesPage() {
           </div>
         )}
 
-        {parsed && parsed.background && (
-          <div className="mb-6 border border-[#1E293B] rounded-2xl bg-[#050816]">
-            <div className="px-5 py-2 border-b border-[#1E293B] text-xs text-gray-400">
-              Background partagé
-            </div>
-            <pre className="font-mono text-[13px] leading-7 p-5 text-gray-200 whitespace-pre overflow-auto">
-              {parsed.background}
-            </pre>
-          </div>
-        )}
-
         {parsed && parsed.scenarios.length === 0 && (
-          <div className="text-gray-500 italic">
-            Aucun scénario n'a pu être extrait de la sortie. La copie brute
-            est disponible via le bouton ci-dessus.
+          <div className="space-y-3">
+            <div className="
+              flex items-start gap-3
+              bg-amber-500/10 border border-amber-500/40
+              text-amber-200 rounded-xl p-4
+            ">
+              <AlertCircle size={20} className="flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold mb-1">
+                  Aucun scénario Gherkin n'a pu être extrait.
+                </p>
+                <p className="text-sm text-amber-100/80">
+                  Le LLM a répondu (voir contenu brut ci-dessous), mais
+                  la réponse ne contient aucun mot-clé{" "}
+                  <code className="text-amber-200">Scenario:</code> /{" "}
+                  <code className="text-amber-200">Scénario:</code>{" "}
+                  exploitable. Vérifie le terminal uvicorn pour le log{" "}
+                  <code className="text-amber-200">
+                    [gherkin_agent] LLM RESPONSE
+                  </code>
+                  .
+                </p>
+              </div>
+            </div>
+            <details
+              open
+              className="
+                border border-[#1E293B] rounded-xl
+                bg-[#050816] overflow-hidden
+              "
+            >
+              <summary className="
+                px-4 py-2 cursor-pointer text-xs text-gray-400
+                bg-[#0B1226] border-b border-[#1E293B]
+                hover:text-white transition
+              ">
+                Réponse brute du LLM ({gherkin.length} caractères)
+              </summary>
+              <pre className="
+                font-mono text-[12.5px] leading-6 p-4
+                text-gray-200 whitespace-pre-wrap break-words
+                overflow-auto max-h-[400px]
+              ">
+                {gherkin || "(vide)"}
+              </pre>
+            </details>
           </div>
         )}
 
@@ -579,6 +737,7 @@ export default function TestCasesPage() {
  * =================================================================== */
 
 const KEYWORD_COLORS: Record<string, string> = {
+  // EN
   Feature: "#A855F7",
   Rule: "#A855F7",
   Background: "#D946EF",
@@ -591,9 +750,25 @@ const KEYWORD_COLORS: Record<string, string> = {
   Then: "#34D399",
   And: "#94A3B8",
   But: "#94A3B8",
+  // FR — même palette pour qu'on retrouve les mêmes repères visuels
+  Fonctionnalité: "#A855F7",
+  Fonctionnalite: "#A855F7",
+  Contexte: "#D946EF",
+  Scénario: "#F59E0B",
+  Scenario_FR: "#F59E0B",
+  "Scénario Outline": "#F59E0B",
+  "Plan du Scénario": "#F59E0B",
+  Exemple: "#F59E0B",
+  Exemples: "#FBBF24",
+  "Étant donné": "#38BDF8",
+  Quand: "#FB923C",
+  Alors: "#34D399",
+  Et: "#94A3B8",
+  Mais: "#94A3B8",
 };
 
 const SECTION_KEYWORDS = [
+  // EN
   "Feature",
   "Rule",
   "Background",
@@ -601,9 +776,32 @@ const SECTION_KEYWORDS = [
   "Scenario",
   "Example",
   "Examples",
+  // FR
+  "Fonctionnalité",
+  "Fonctionnalite",
+  "Contexte",
+  "Plan du Scénario",
+  "Scénario Outline",
+  "Scénario",
+  "Exemple",
+  "Exemples",
 ];
 
-const STEP_KEYWORDS = ["Given", "When", "Then", "And", "But"];
+const STEP_KEYWORDS = [
+  // EN
+  "Given",
+  "When",
+  "Then",
+  "And",
+  "But",
+  // FR
+  "Étant donné",
+  "Etant donné",
+  "Quand",
+  "Alors",
+  "Et",
+  "Mais",
+];
 
 function GherkinViewer({ code }: { code: string }) {
   const lines = code.split("\n");
@@ -826,6 +1024,16 @@ function BulkToolbar({
 }) {
   const allUnvalidatedSelected =
     unvalidatedCount > 0 && selectedCount === unvalidatedCount;
+  const someSelected = selectedCount > 0 && !allUnvalidatedSelected;
+  const noneSelectable = unvalidatedCount === 0;
+
+  // Toggle « master » de la case à cocher :
+  // - rien de coché → on coche tout (sélection des non-validés)
+  // - au moins un coché (partiel ou complet) → on décoche tout
+  const handleMasterToggle = () => {
+    if (selectedCount === 0) onSelectAll();
+    else onClearSelection();
+  };
 
   return (
     <div
@@ -836,6 +1044,43 @@ function BulkToolbar({
       "
     >
       <div className="flex items-center gap-3 text-sm">
+        {/* Case à cocher master — remplace le bouton 'Tout sélectionner' */}
+        <button
+          onClick={handleMasterToggle}
+          disabled={bulkSaving || noneSelectable}
+          aria-label={
+            allUnvalidatedSelected
+              ? "Tout désélectionner"
+              : "Tout sélectionner"
+          }
+          title={
+            noneSelectable
+              ? "Aucun scénario validable"
+              : allUnvalidatedSelected
+                ? "Tout désélectionner"
+                : someSelected
+                  ? `Désélectionner (${selectedCount} sélectionné${selectedCount > 1 ? "s" : ""})`
+                  : "Tout sélectionner"
+          }
+          className={`
+            w-5 h-5 rounded-md border-2 flex-shrink-0
+            flex items-center justify-center transition
+            ${
+              allUnvalidatedSelected
+                ? "bg-[#7C3AED] border-[#7C3AED]"
+                : someSelected
+                  ? "bg-[#7C3AED]/40 border-[#7C3AED]"
+                  : "border-gray-600 hover:border-[#7C3AED]"
+            }
+            disabled:opacity-40 disabled:cursor-not-allowed
+          `}
+        >
+          {allUnvalidatedSelected && (
+            <Check size={12} className="text-white" />
+          )}
+          {someSelected && <Minus size={12} className="text-white" />}
+        </button>
+
         <span className="text-gray-400">
           {selectedCount > 0 ? (
             <>
@@ -865,33 +1110,6 @@ function BulkToolbar({
       </div>
 
       <div className="flex items-center gap-2">
-        <button
-          onClick={onSelectAll}
-          disabled={bulkSaving || unvalidatedCount === 0 || allUnvalidatedSelected}
-          className="
-            px-3 py-1.5 rounded-lg text-sm
-            border border-[#334155] text-gray-300
-            hover:bg-[#111827] hover:border-[#7C3AED] hover:text-white
-            disabled:opacity-40 disabled:cursor-not-allowed
-            transition
-          "
-        >
-          Tout sélectionner
-        </button>
-
-        <button
-          onClick={onClearSelection}
-          disabled={bulkSaving || selectedCount === 0}
-          className="
-            px-3 py-1.5 rounded-lg text-sm
-            border border-[#334155] text-gray-300
-            hover:bg-[#111827] disabled:opacity-40 disabled:cursor-not-allowed
-            transition
-          "
-        >
-          Tout désélectionner
-        </button>
-
         <button
           onClick={onBulkValidate}
           disabled={bulkSaving || selectedCount === 0}
@@ -960,10 +1178,12 @@ function ScenarioCard({
   onCancelEdit,
   onValidate,
 }: ScenarioCardProps) {
-  // tags affichables : on les relit du texte courant (pas du parser
-  // initial) pour rester cohérent après une édition manuelle
-  const tags = extractTagsFromBlock(currentText);
+  // tags : ils sont consolidés par le parser dans scenario.tags
+  // (cf. lib/test-cases.ts) — on ne les re-scanne pas dans le body
+  // car le body n'en contient plus (dédoublonnage avec le bandeau).
+  const tags = scenario.tags;
   const title = extractTitleFromBlock(currentText) || scenario.title;
+  const incomplete = !hasSteps(currentText);
 
   return (
     <div
@@ -972,9 +1192,11 @@ function ScenarioCard({
         ${
           isValidated
             ? "border-emerald-500/50 shadow-[0_0_20px_-12px_rgba(16,185,129,0.4)]"
-            : isSelected
-              ? "border-[#A855F7] shadow-[0_0_20px_-12px_rgba(168,85,247,0.5)]"
-              : "border-[#1E293B] hover:border-[#7C3AED]/40"
+            : incomplete
+              ? "border-amber-500/40"
+              : isSelected
+                ? "border-[#A855F7] shadow-[0_0_20px_-12px_rgba(168,85,247,0.5)]"
+                : "border-[#1E293B] hover:border-[#7C3AED]/40"
         }
       `}
     >
@@ -1008,6 +1230,20 @@ function ScenarioCard({
             </button>
           )}
           <h3 className="font-semibold text-base truncate">{title}</h3>
+          {incomplete && !isValidated && (
+            <span
+              title="Ce scénario n'a pas de steps Given/When/Then — la génération a probablement été tronquée. Édite-le pour ajouter le corps, ou régénère."
+              className="
+                flex items-center gap-1
+                text-[10px] px-2 py-0.5 rounded-md
+                bg-amber-500/10 text-amber-300
+                border border-amber-500/40
+                flex-shrink-0
+              "
+            >
+              <AlertCircle size={11} /> incomplet
+            </span>
+          )}
           {tags.length > 0 && (
             <div className="flex gap-1 flex-shrink-0">
               {tags.map((t) => (
@@ -1043,7 +1279,12 @@ function ScenarioCard({
           {!isEditing && (
             <button
               onClick={onValidate}
-              disabled={isSaving}
+              disabled={isSaving || (incomplete && !isValidated)}
+              title={
+                incomplete && !isValidated
+                  ? "Scénario incomplet — édite-le pour ajouter les steps avant de valider"
+                  : undefined
+              }
               className={`
                 px-3 py-1.5 rounded-lg
                 transition flex items-center gap-1.5 text-sm
@@ -1052,7 +1293,7 @@ function ScenarioCard({
                     ? "bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 cursor-default"
                     : "bg-gradient-to-r from-[#7C3AED] to-[#10B981] hover:opacity-90 text-white"
                 }
-                disabled:opacity-50
+                disabled:opacity-50 disabled:cursor-not-allowed
               `}
             >
               {isSaving ? (
@@ -1121,21 +1362,54 @@ function ScenarioCard({
 /* --- Helpers : extraction title/tags d'un bloc Gherkin --- */
 function extractTitleFromBlock(block: string): string {
   for (const line of block.split("\n")) {
-    const m = line.match(/^\s*Scenario(?: Outline)?:\s*(.*)$/i);
+    const m = line.match(
+      /^\s*(?:Scenario(?: Outline)?|Sc[ée]nario(?: Outline)?|Plan du Sc[ée]nario|Exemple|Example)(?::|\s)\s*(.+)$/i,
+    );
     if (m) return m[1].trim();
   }
   return "";
 }
 
+const STEP_KEYWORD_RE = /^\s*(Given|When|Then|And|But|Étant donné|Quand|Alors|Et|Mais)\b/i;
+
+/**
+ * Extrait les tags Gherkin d'un bloc, peu importe où ils sont placés
+ * (avant Scenario:, ou après, dans une ligne séparée). On parcourt
+ * toutes les lignes jusqu'à la première step pour ramasser ce qui
+ * commence par @. Les doublons sont éliminés en gardant l'ordre.
+ *
+ * Pourquoi cette tolérance : les LLM produisent assez librement
+ * `@perf @critical` au-dessus OU en-dessous de `Scenario:`, surtout
+ * quand on leur demande plusieurs tags par scénario. Plutôt que
+ * d'imposer la convention stricte, on accepte les deux.
+ */
 function extractTagsFromBlock(block: string): string[] {
+  const seen = new Set<string>();
+  const tags: string[] = [];
   for (const line of block.split("\n")) {
     const trimmed = line.trim();
     if (trimmed === "") continue;
-    // première ligne non vide : si tags, on les renvoie
+    // On s'arrête dès qu'on rencontre une vraie step : on est passé
+    // au corps du scénario, plus aucun tag à attendre.
+    if (STEP_KEYWORD_RE.test(trimmed)) break;
     if (trimmed.startsWith("@")) {
-      return trimmed.split(/\s+/).filter((t) => t.startsWith("@"));
+      for (const tag of trimmed.split(/\s+/).filter((t) => t.startsWith("@"))) {
+        if (!seen.has(tag)) {
+          seen.add(tag);
+          tags.push(tag);
+        }
+      }
     }
-    return [];
+    // Toute autre ligne (Scenario:, description, etc.) est ignorée
+    // pour l'extraction des tags — on continue à scanner.
   }
-  return [];
+  return tags;
+}
+
+/**
+ * Détecte un scénario incomplet : aucune step Given/When/Then dans
+ * le bloc. Le LLM nous a probablement coupé après le titre.
+ */
+function hasSteps(block: string): boolean {
+  return block.split("\n").some((line) => STEP_KEYWORD_RE.test(line));
 }
