@@ -15,6 +15,12 @@ export const API_BASE =
 // --------------------------------------------------------------------
 export type DetailLevel = "standard" | "avance" | "expert";
 
+export type TestType =
+  | "fonctionnels"
+  | "non_regression"
+  | "performance"
+  | "stress";
+
 export type ValidatedTestCase = {
   id: string;
   title: string;
@@ -23,6 +29,8 @@ export type ValidatedTestCase = {
   source_spec: string;
   detail_level: DetailLevel;
   feature: string;
+  project_name: string;
+  test_type: TestType;
   created_at: string;
   updated_at: string;
 };
@@ -34,6 +42,8 @@ export type TestCasePayload = {
   source_spec?: string;
   detail_level?: DetailLevel;
   feature?: string;
+  project_name?: string;
+  test_type?: TestType;
 };
 
 // --------------------------------------------------------------------
@@ -56,9 +66,18 @@ export type ParsedGherkin = {
   scenarios: ParsedScenario[];
 };
 
-const SCENARIO_RE = /^Scenario(?: Outline)?:\s*(.*)$/i;
-const FEATURE_RE = /^Feature:\s*(.*)$/i;
-const BACKGROUND_RE = /^Background:\s*(.*)$/i;
+// Gherkin est internationalisé : on accepte aussi bien les mots-clés
+// anglais que français pour ne pas rater une génération que le LLM
+// produit en FR par mimétisme avec le prompt.
+//
+// Les deux-points après le mot-clé sont théoriquement obligatoires mais
+// les LLM les omettent parfois ("Scenario Accès..." au lieu de
+// "Scenario: Accès..."). On accepte donc colon OU whitespace après le
+// keyword, suivi du titre.
+const SCENARIO_RE =
+  /^(?:Scenario(?: Outline)?|Sc[ée]nario(?: Outline)?|Plan du Sc[ée]nario|Exemple|Example)(?::|\s)\s*(.+)$/i;
+const FEATURE_RE = /^(?:Feature|Fonctionnalit[ée])(?::|\s)\s*(.+)$/i;
+const BACKGROUND_RE = /^(?:Background|Contexte)(?::|\s)\s*(.*)$/i;
 const TAG_LINE_RE = /^\s*@[\w-]+(?:\s+@[\w-]+)*\s*$/;
 
 /**
@@ -84,18 +103,66 @@ export function parseGherkin(code: string): ParsedGherkin {
 
   const flushScenario = () => {
     if (currentTitle === null) return;
+
+    // Consolidation des tags : tout ce qui était attaché AVANT
+    // `Scenario:` (currentTags) + toute ligne de tags trouvée DANS le
+    // bloc (cas LLM mal placé). Doublons éliminés en gardant l'ordre.
+    const seen = new Set<string>();
+    const allTags: string[] = [];
+    for (const tag of currentTags) {
+      if (!seen.has(tag)) {
+        seen.add(tag);
+        allTags.push(tag);
+      }
+    }
+
+    // On reconstruit le rawText SANS les lignes de tags, pour éviter
+    // la double affichage (badges dans le bandeau + ligne dans le code).
+    const bodyLines: string[] = [];
+    for (const blockLine of currentBlock) {
+      const t = blockLine.trim();
+      if (TAG_LINE_RE.test(t)) {
+        for (const tag of t.split(/\s+/).filter((x) => x.startsWith("@"))) {
+          if (!seen.has(tag)) {
+            seen.add(tag);
+            allTags.push(tag);
+          }
+        }
+        // ligne de tags : on l'extrait, on ne la garde pas dans le body
+        continue;
+      }
+      bodyLines.push(blockLine);
+    }
+
     scenarios.push({
       clientId: `scn-${scenarios.length}`,
       title: currentTitle,
-      tags: currentTags,
-      rawText: currentBlock.join("\n").replace(/\n+$/, ""),
+      tags: allTags,
+      rawText: bodyLines.join("\n").replace(/\n+$/, ""),
     });
     currentTitle = null;
     currentBlock = [];
     currentTags = [];
   };
 
-  for (const line of lines) {
+  /**
+   * Regarde les lignes suivantes en sautant les lignes vides et les
+   * autres lignes de tags. Renvoie la 1ère ligne « réelle » trouvée.
+   * Sert à décider si une ligne de tags est une frontière de scénario
+   * (suivie d'un Scenario:) ou simplement mal placée à l'intérieur.
+   */
+  const peekNextReal = (startIdx: number): string => {
+    for (let j = startIdx; j < lines.length; j++) {
+      const t = lines[j].trim();
+      if (t === "") continue;
+      if (TAG_LINE_RE.test(t)) continue;
+      return t;
+    }
+    return "";
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const trimmed = line.trim();
 
     // ligne vide : on la conserve dans le bloc courant pour préserver
@@ -122,18 +189,41 @@ export function parseGherkin(code: string): ParsedGherkin {
       continue;
     }
 
-    // Ligne de tags : on la met en attente pour le prochain Scenario.
+    // Ligne de tags : on regarde ce qui vient APRÈS pour décider.
     if (TAG_LINE_RE.test(trimmed)) {
-      // si on est en cours de bloc, c'est une frontière de scénario
-      flushScenario();
-      if (inBackground) {
-        background = backgroundBlock.join("\n").trim();
-        inBackground = false;
-        backgroundBlock = [];
+      const next = peekNextReal(i + 1);
+      const isBoundary = SCENARIO_RE.test(next);
+
+      if (isBoundary) {
+        // Standard Gherkin : tags juste avant un Scenario:. Quel que
+        // soit l'état (dans un scénario ou non), c'est une FRONTIÈRE.
+        flushScenario();
+        if (inBackground) {
+          background = backgroundBlock.join("\n").trim();
+          inBackground = false;
+          backgroundBlock = [];
+        }
+        // On cumule (au cas où plusieurs lignes de tags consécutives)
+        const newTags = trimmed
+          .split(/\s+/)
+          .filter((t) => t.startsWith("@"));
+        pendingTags = [...pendingTags, ...newTags];
+        continue;
       }
-      pendingTags = trimmed.split(/\s+/).filter((t) => t.startsWith("@"));
-      // on ne push pas la ligne de tag tout de suite, elle sera dans
-      // le bloc du Scenario suivant.
+
+      // Pas suivi de Scenario: → tags mal placés à l'intérieur. On les
+      // conserve dans le bloc courant pour ne pas les perdre.
+      if (currentTitle !== null) {
+        currentBlock.push(line);
+      } else if (inBackground) {
+        backgroundBlock.push(line);
+      } else {
+        // En dehors de tout, on les met quand même en pending
+        const newTags = trimmed
+          .split(/\s+/)
+          .filter((t) => t.startsWith("@"));
+        pendingTags = [...pendingTags, ...newTags];
+      }
       continue;
     }
 
@@ -149,13 +239,10 @@ export function parseGherkin(code: string): ParsedGherkin {
       currentTitle = mScenario[1].trim() || "Scenario sans titre";
       currentTags = pendingTags;
       pendingTags = [];
-      // on commence le bloc en incluant la ligne de tags si présente,
-      // puis la ligne Scenario:
-      currentBlock = [];
-      if (currentTags.length > 0) {
-        currentBlock.push(currentTags.join(" "));
-      }
-      currentBlock.push(line);
+      // Le bloc démarre directement à la ligne Scenario: — les tags
+      // sont gérés à part dans currentTags et seront extraits dans
+      // scenario.tags par flushScenario.
+      currentBlock = [line];
       continue;
     }
 
@@ -225,4 +312,11 @@ export const DETAIL_LEVEL_LABELS: Record<DetailLevel, string> = {
   standard: "Standard",
   avance: "Avancé",
   expert: "Expert QA",
+};
+
+export const TEST_TYPE_LABELS: Record<TestType, string> = {
+  fonctionnels: "Fonctionnels",
+  non_regression: "Non-régression",
+  performance: "Performance",
+  stress: "Stress",
 };

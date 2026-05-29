@@ -130,7 +130,13 @@ app.add_middleware(
 )
 
 class SpecRequest(BaseModel):
-    text: str
+    # Nom du projet : sert à la fois de métadonnée et de requête pour le
+    # RAG (le LLM va chercher dans Chroma les chunks les plus proches
+    # sémantiquement de ce nom).
+    project_name: str
+    # Type de tests à générer.
+    # Valeurs : "fonctionnels" | "non_regression" | "performance" | "stress"
+    test_type: str = "fonctionnels"
     # Niveau de détail attendu sur la génération Gherkin.
     # Valeurs : "standard" | "avance" | "expert" (cf. gherkin_agent.py)
     detail_level: str = "standard"
@@ -157,9 +163,13 @@ def ingest(req: SpecRequest):
 @app.post("/generate")
 def generate(req: SpecRequest):
 
+    # Le nom du projet sert de "spec" virtuelle pour le LLM (et de
+    # requête pour le RAG). Le contenu réel viendra du contexte RAG.
     result = app_graph.invoke({
-        "input": req.text,
+        "input": req.project_name,
         "detail_level": req.detail_level,
+        "test_type": req.test_type,
+        "project_name": req.project_name,
     })
 
     print("GRAPH RESULT =", result)
@@ -410,6 +420,10 @@ class TestCaseCreate(BaseModel):
     source_spec: str = ""
     detail_level: str = "standard"
     feature: str = ""
+    # Nom du projet d'où vient le cas, saisi côté UI dans /test-cases.
+    project_name: str = ""
+    # Type de tests (fonctionnels / non_regression / performance / stress).
+    test_type: str = "fonctionnels"
 
 
 class TestCaseUpdate(BaseModel):

@@ -90,6 +90,8 @@ def create_test_case(payload: dict) -> dict:
             ],
             "detail_level": payload.get("detail_level") or "standard",
             "feature": (payload.get("feature") or "").strip(),
+            "project_name": (payload.get("project_name") or "").strip(),
+            "test_type": payload.get("test_type") or "fonctionnels",
             "created_at": now,
             "updated_at": now,
         }
