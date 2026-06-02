@@ -320,3 +320,162 @@ export const TEST_TYPE_LABELS: Record<TestType, string> = {
   performance: "Performance",
   stress: "Stress",
 };
+
+// --------------------------------------------------------------------
+// Génération de scripts de tests (Playwright, ...)
+// --------------------------------------------------------------------
+export type ScriptFramework = "playwright"; // "cypress" | "selenium" à venir
+export type ScriptLanguage = "typescript";
+
+export const SCRIPT_FRAMEWORK_LABELS: Record<ScriptFramework, string> = {
+  playwright: "Playwright",
+};
+
+// Un script généré par le LLM pour UN cas validé.
+export type GeneratedScriptPerCase = {
+  test_case_id: string;
+  test_case_title: string;
+  framework: ScriptFramework;
+  language: ScriptLanguage;
+  code: string;
+  tags: string[];
+  project_name: string;
+  test_type: string;
+  error?: string;
+};
+
+// Réponse du backend pour /test-scripts/generate.
+export type GeneratedScriptsResponse = {
+  framework: ScriptFramework;
+  language: ScriptLanguage;
+  project_name: string;
+  scripts: GeneratedScriptPerCase[];
+  missing_ids: string[];
+};
+
+export async function generateScripts(args: {
+  test_case_ids: string[];
+  framework?: ScriptFramework;
+  language?: ScriptLanguage;
+  project_name?: string;
+}): Promise<GeneratedScriptsResponse> {
+  const res = await fetch(`${API_BASE}/test-scripts/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      framework: "playwright",
+      language: "typescript",
+      ...args,
+    }),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) detail = body.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// --------------------------------------------------------------------
+// Scripts de tests VALIDÉS (persistés en backend, consommés par /executions)
+// --------------------------------------------------------------------
+export type ValidatedScript = {
+  id: string;
+  test_case_id: string | null;
+  test_case_title: string;
+  framework: ScriptFramework;
+  language: ScriptLanguage;
+  code: string;
+  project_name: string;
+  tags: string[];
+  test_type: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ValidatedScriptPayload = {
+  test_case_id?: string | null;
+  test_case_title: string;
+  framework: ScriptFramework;
+  language?: ScriptLanguage;
+  code: string;
+  project_name?: string;
+  tags?: string[];
+  test_type?: string;
+};
+
+export async function fetchValidatedScripts(): Promise<ValidatedScript[]> {
+  const res = await fetch(`${API_BASE}/validated-scripts`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function saveValidatedScript(
+  payload: ValidatedScriptPayload,
+): Promise<ValidatedScript> {
+  const res = await fetch(`${API_BASE}/validated-scripts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) detail = body.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+export async function deleteValidatedScript(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/validated-scripts/${id}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
+// --------------------------------------------------------------------
+// Helpers de nommage de fichiers
+// --------------------------------------------------------------------
+
+/**
+ * Slug ASCII compatible avec un nom de fichier. Translittère les
+ * caractères accentués (é → e, à → a, ç → c, ô → o, ñ → n, ...)
+ * AVANT de remplacer le reste par des tirets.
+ */
+export function slugify(text: string): string {
+  return (
+    text
+      // décompose en base + accent (NFD), puis retire les marques
+      // diacritiques (plage Unicode U+0300..U+036F). Ainsi :
+      //   "é" → "e" + ́ (combining acute) → on garde "e"
+      //   "à" → "a", "ç" → "c", "ô" → "o", "ñ" → "n", etc.
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 40) || "tests"
+  );
+}
+
+/** Construit un nom de fichier `<projet>__<titre>.spec.ts`. */
+export function scriptFilename(s: {
+  project_name?: string;
+  test_case_title?: string;
+}): string {
+  const projectSlug = slugify(s.project_name || "tests");
+  const titleSlug = slugify(s.test_case_title || "case");
+  return `${projectSlug}__${titleSlug}.spec.ts`;
+}

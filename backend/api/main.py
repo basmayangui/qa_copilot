@@ -23,6 +23,14 @@ from api.test_cases import (
     update_test_case,
     delete_test_case,
 )
+from api.script_generator import generate_scripts_for_cases
+from api.validated_scripts import (
+    list_validated_scripts,
+    get_validated_script,
+    create_validated_script,
+    update_validated_script,
+    delete_validated_script,
+)
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -468,3 +476,134 @@ def delete_test_case_route(tc_id: str):
     if not delete_test_case(tc_id):
         raise HTTPException(status_code=404, detail="Cas de test introuvable")
     return {"status": "ok", "id": tc_id}
+
+
+# ------------------------------------------------------------------
+# Génération de scripts de tests (Playwright, ...) à partir des cas
+# validés.
+# ------------------------------------------------------------------
+class TestScriptGenerateRequest(BaseModel):
+    test_case_ids: list[str]
+    framework: str = "playwright"
+    language: str = "typescript"
+    # Nom du projet, utilisé pour le test.describe() en haut du fichier.
+    # Si vide, on dérive du premier cas trouvé.
+    project_name: str = ""
+
+
+@app.post("/test-scripts/generate")
+def generate_test_script_route(req: TestScriptGenerateRequest):
+    """
+    Génère UN script par cas validé sélectionné. Renvoie une liste de
+    scripts, un par cas, chacun indépendant. Pour l'instant :
+    Playwright TypeScript uniquement.
+    """
+    if not req.test_case_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Au moins un cas de test doit être sélectionné.",
+        )
+
+    cases: list[dict] = []
+    missing: list[str] = []
+    for tc_id in req.test_case_ids:
+        tc = get_test_case(tc_id)
+        if tc is None:
+            missing.append(tc_id)
+        else:
+            cases.append(tc)
+
+    if not cases:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Aucun cas trouvé pour les IDs fournis ({missing}).",
+        )
+
+    # Nom de projet : on prend celui passé en payload, ou à défaut le
+    # project_name du premier cas. Le script_generator utilisera ensuite
+    # le project_name de chaque cas individuellement.
+    project_name = req.project_name or (
+        cases[0].get("project_name") or cases[0].get("feature") or ""
+    )
+
+    try:
+        scripts = generate_scripts_for_cases(
+            cases,
+            framework=req.framework,
+            language=req.language,
+            project_name=project_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur LLM : {exc}",
+        ) from exc
+
+    return {
+        "framework": req.framework,
+        "language": req.language,
+        "project_name": project_name,
+        "scripts": scripts,
+        "missing_ids": missing,
+    }
+
+
+# ------------------------------------------------------------------
+# Scripts de tests validés — CRUD (utilisé par /executions côté front)
+# ------------------------------------------------------------------
+class ValidatedScriptCreate(BaseModel):
+    test_case_id: str | None = None
+    test_case_title: str = ""
+    framework: str = "playwright"
+    language: str = "typescript"
+    code: str
+    project_name: str = ""
+    tags: list[str] = []
+    test_type: str = "fonctionnels"
+
+
+class ValidatedScriptUpdate(BaseModel):
+    test_case_title: str | None = None
+    code: str | None = None
+    tags: list[str] | None = None
+    project_name: str | None = None
+
+
+@app.get("/validated-scripts")
+def list_validated_scripts_route():
+    """Liste tous les scripts de test validés, du plus récent au plus ancien."""
+    return list_validated_scripts()
+
+
+@app.get("/validated-scripts/{script_id}")
+def get_validated_script_route(script_id: str):
+    s = get_validated_script(script_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Script introuvable")
+    return s
+
+
+@app.post("/validated-scripts")
+def create_validated_script_route(payload: ValidatedScriptCreate):
+    return create_validated_script(payload.model_dump())
+
+
+@app.patch("/validated-scripts/{script_id}")
+def update_validated_script_route(
+    script_id: str, payload: ValidatedScriptUpdate
+):
+    updated = update_validated_script(
+        script_id, payload.model_dump(exclude_none=True)
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Script introuvable")
+    return updated
+
+
+@app.delete("/validated-scripts/{script_id}")
+def delete_validated_script_route(script_id: str):
+    if not delete_validated_script(script_id):
+        raise HTTPException(status_code=404, detail="Script introuvable")
+    return {"status": "ok", "id": script_id}
