@@ -173,6 +173,19 @@ Créer le fichier `backend/.env` :
 ```env
 OPENAI_API_KEY=sk-...
 
+# --- LLM (chat + génération Gherkin + scripts Playwright) ---
+#
+# Par défaut, l'API OpenAI publique est utilisée (non souveraine).
+# Pour basculer sur Mistral via OVH AI Endpoints (souverain, RGPD,
+# données hébergées en UE) :
+LLM_PROVIDER=mistral_ovh
+LLM_BASE_URL=https://mistral-small-24b-instruct-2501.endpoints.kepler.ai.cloud.ovh.net/api/openai_compat/v1
+LLM_API_KEY=<token-ovh-ai-endpoints>
+LLM_MODEL=Mistral-Small-24B-Instruct-2501
+# Optionnels :
+# LLM_TEMPERATURE=0.4
+# LLM_MAX_TOKENS=8000
+
 # --- Pipeline RAG (toutes ces variables sont optionnelles) ---
 
 # Modèle d'embedding OpenAI.
@@ -182,10 +195,10 @@ OPENAI_API_KEY=sk-...
 # Tout changement déclenche un rebuild complet automatique au démarrage.
 RAG_EMBED_MODEL=text-embedding-3-small
 
-# Nombre de chunks envoyés par batch à OpenAI embeddings.
+# Nombre de chunks envoyés par batch au service d'embeddings.
 RAG_EMBED_BATCH_SIZE=256
 
-# Pause (secondes) entre deux batches pour ménager le TPM OpenAI.
+# Pause (secondes) entre deux batches pour ménager le TPM.
 RAG_EMBED_BATCH_PAUSE_SEC=0.1
 
 # Threads pour le chargement parallèle des fichiers (Phase 1 du rebuild).
@@ -196,6 +209,13 @@ RAG_WATCH_INTERVAL_SEC=30
 ```
 
 **Note** : un changement de `RAG_EMBED_MODEL` est détecté automatiquement (le nom du modèle est inclus dans `chroma_db/.manifest.json`) et déclenche un rebuild complet au prochain démarrage.
+
+#### Souveraineté du LLM
+
+Le projet est conçu pour être déployé en environnement **souverain**. Le module `api/llm_client.py` centralise l'instanciation du LLM : il suffit de pointer `LLM_BASE_URL` vers un endpoint Mistral hébergé en UE (typiquement OVH AI Endpoints).
+
+- **OVH AI Endpoints** sert des modèles Mistral (Apache 2.0) depuis des datacenters européens. Pas de Cloud Act US. Recours juridique en France en cas de litige.
+- L'application n'est pas couplée à un fournisseur précis : tout endpoint qui respecte le format de l'API conventionnel des LLM (Mistral via OVH, vLLM auto-hébergé, etc.) fonctionne sans modification de code.
 
 ### Frontend — `frontend/.env.local` (optionnel)
 

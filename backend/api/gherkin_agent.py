@@ -1,22 +1,18 @@
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, END
-from langchain_openai import ChatOpenAI
 
 from api.rag.retriever import retrieve_context
 from api.rag.vector_store import get_retriever
+from api.llm_client import get_chat_llm
 
 import os
 from dotenv import load_dotenv
 load_dotenv() ## loading all the environment variable
 
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
-
-# Config LLM minimale : on évite max_tokens et temperature qui peuvent
-# être incompatibles avec certaines variantes de gpt-5-nano (modèles
-# "reasoning" qui consomment leur budget en réflexion interne et
-# n'émettent rien de visible si on les contraint trop).
-llm = ChatOpenAI(model="gpt-5-nano")
+# Le LLM est configuré via env (LLM_BASE_URL, LLM_API_KEY, LLM_MODEL)
+# dans backend/.env. Voir api/llm_client.py.
+llm = get_chat_llm()
 
 class AgentState(TypedDict, total=False):
     input: str

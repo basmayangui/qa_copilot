@@ -762,23 +762,29 @@ function BulkScriptToolbar({
         className="
           px-4 py-1.5 rounded-lg text-sm font-semibold
           bg-gradient-to-r from-[#7C3AED] to-[#10B981]
-          hover:opacity-90 transition
+          hover:brightness-110
           disabled:opacity-40 disabled:cursor-not-allowed
-          flex items-center gap-2
+          focus:outline-none focus-visible:ring-2 focus-visible:ring-[#A855F7]
+          flex items-center justify-center gap-2
+          min-w-[220px]
         "
       >
         {bulkSaving ? (
           <>
             <Loader2 size={14} className="animate-spin" />
-            {bulkProgress
-              ? `Validation ${bulkProgress.done}/${bulkProgress.total}…`
-              : "Validation…"}
+            <span>
+              {bulkProgress
+                ? `Validation ${bulkProgress.done}/${bulkProgress.total}…`
+                : "Validation…"}
+            </span>
           </>
         ) : (
           <>
             <CheckCircle2 size={14} />
-            Valider la sélection
-            {selectedCount > 0 && ` (${selectedCount})`}
+            <span>
+              Valider la sélection
+              {selectedCount > 0 && ` (${selectedCount})`}
+            </span>
           </>
         )}
       </button>
