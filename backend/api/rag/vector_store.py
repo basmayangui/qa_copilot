@@ -26,11 +26,11 @@ from api.rag.loaders import load_document
 # besoin de revenir en arrière ou de monter en 3-large.
 EMBED_MODEL = os.getenv("RAG_EMBED_MODEL", "text-embedding-3-small")
 
-# Taille de batch pour l'envoi des chunks à OpenAI embeddings.
-# Avec 3-small (limites TPM plus hautes), 256 passe sans problème.
+# Taille de batch pour l'envoi des chunks au service d'embeddings.
+# 256 reste sous les limites TPM des principaux fournisseurs.
 EMBED_BATCH_SIZE = int(os.getenv("RAG_EMBED_BATCH_SIZE", "256"))
 
-# Pause entre deux batches — modeste avec 3-small dont le TPM est large.
+# Pause entre deux batches — utile sur les fournisseurs à TPM contraint.
 EMBED_BATCH_PAUSE_SEC = float(os.getenv("RAG_EMBED_BATCH_PAUSE_SEC", "0.1"))
 
 # Nombre de PROCESS workers pour le chargement parallèle (Phase 1).
@@ -47,7 +47,7 @@ _RETRY_BACKOFF_CAP_SEC = 60
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """Détecte les erreurs OpenAI 429, qu'elles soient typées ou wrappées."""
+    """Détecte les erreurs 429 (rate limit), typées ou wrappées."""
     try:
         from openai import RateLimitError
         if isinstance(exc, RateLimitError):
@@ -63,7 +63,7 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 def _call_with_retry(fn, *, label: str):
-    """Exécute fn() avec retry exponentiel sur RateLimitError."""
+    """Exécute fn() avec retry exponentiel sur erreur de rate limit."""
     for attempt in range(_RETRY_MAX_ATTEMPTS):
         try:
             return fn()
@@ -72,7 +72,7 @@ def _call_with_retry(fn, *, label: str):
                 raise
             wait = min(2 ** (attempt + 1), _RETRY_BACKOFF_CAP_SEC)
             print(
-                f"[rag]   ⏳ {label} : rate limit OpenAI, "
+                f"[rag]   ⏳ {label} : rate limit, "
                 f"retry dans {wait}s (tentative {attempt + 2}/{_RETRY_MAX_ATTEMPTS})"
             )
             time.sleep(wait)
@@ -370,12 +370,12 @@ def rebuild_rag():
             _write_manifest(_current_manifest())
             return None
 
-        # -- Phase 3/3 : embeddings OpenAI + indexation Chroma -------
+        # -- Phase 3/3 : embeddings + indexation Chroma --------------
         t_phase = time.time()
         total = len(chunks)
         n_batches = (total + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE
         print(
-            f"[rag] Phase 3/3 — embeddings OpenAI + indexation "
+            f"[rag] Phase 3/3 — embeddings + indexation "
             f"({total} chunks en {n_batches} batch(es) de {EMBED_BATCH_SIZE})..."
         )
 

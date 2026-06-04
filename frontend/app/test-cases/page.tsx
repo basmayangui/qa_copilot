@@ -17,6 +17,8 @@ import {
 import {
   parseGherkin,
   saveTestCase,
+  normalizeGherkinText,
+  STEP_KEYWORD_RE,
   type DetailLevel,
   type ParsedScenario,
   type TestType,
@@ -111,7 +113,15 @@ export default function TestCasesPage() {
           setGherkin(data.gherkin);
         }
         if (data.scenarioText && typeof data.scenarioText === "object") {
-          setScenarioText(data.scenarioText);
+          // Ré-applique la normalisation d'indentation aux textes en
+          // cache (utile si le draft a été persisté avant que le parser
+          // n'ait sa version actuelle).
+          const renormalized: Record<string, string> = {};
+          for (const [id, text] of Object.entries(data.scenarioText)) {
+            renormalized[id] =
+              typeof text === "string" ? normalizeGherkinText(text) : "";
+          }
+          setScenarioText(renormalized);
         }
         if (data.validatedMap && typeof data.validatedMap === "object") {
           setValidatedMap(data.validatedMap);
@@ -186,7 +196,12 @@ export default function TestCasesPage() {
 
   function saveEdit() {
     if (editingId === null) return;
-    setScenarioText((prev) => ({ ...prev, [editingId]: editBuffer }));
+    // Re-normalise l'indentation après édition pour rester cohérent
+    // avec le reste de l'affichage.
+    setScenarioText((prev) => ({
+      ...prev,
+      [editingId]: normalizeGherkinText(editBuffer),
+    }));
     setEditingId(null);
     setEditBuffer("");
   }
@@ -1116,23 +1131,29 @@ function BulkToolbar({
           className="
             px-4 py-1.5 rounded-lg text-sm font-semibold
             bg-gradient-to-r from-[#7C3AED] to-[#10B981]
-            hover:opacity-90 transition
+            hover:brightness-110
             disabled:opacity-40 disabled:cursor-not-allowed
-            flex items-center gap-2
+            focus:outline-none focus-visible:ring-2 focus-visible:ring-[#A855F7]
+            flex items-center justify-center gap-2
+            min-w-[220px]
           "
         >
           {bulkSaving ? (
             <>
               <Loader2 size={14} className="animate-spin" />
-              {bulkProgress
-                ? `Validation ${bulkProgress.done}/${bulkProgress.total}…`
-                : "Validation…"}
+              <span>
+                {bulkProgress
+                  ? `Validation ${bulkProgress.done}/${bulkProgress.total}…`
+                  : "Validation…"}
+              </span>
             </>
           ) : (
             <>
               <CheckCircle2 size={14} />
-              Valider la sélection
-              {selectedCount > 0 && ` (${selectedCount})`}
+              <span>
+                Valider la sélection
+                {selectedCount > 0 && ` (${selectedCount})`}
+              </span>
             </>
           )}
         </button>
@@ -1370,7 +1391,8 @@ function extractTitleFromBlock(block: string): string {
   return "";
 }
 
-const STEP_KEYWORD_RE = /^\s*(Given|When|Then|And|But|Étant donné|Quand|Alors|Et|Mais)\b/i;
+// STEP_KEYWORD_RE est importé de lib/test-cases.ts pour rester en phase
+// avec la normalisation faite côté parser.
 
 /**
  * Extrait les tags Gherkin d'un bloc, peu importe où ils sont placés

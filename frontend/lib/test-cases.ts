@@ -80,6 +80,117 @@ const FEATURE_RE = /^(?:Feature|Fonctionnalit[ée])(?::|\s)\s*(.+)$/i;
 const BACKGROUND_RE = /^(?:Background|Contexte)(?::|\s)\s*(.*)$/i;
 const TAG_LINE_RE = /^\s*@[\w-]+(?:\s+@[\w-]+)*\s*$/;
 
+// Plage de "blancs invisibles" Unicode qui ne sont pas couverts par
+// String.prototype.trim() : zero-width joiner/non-joiner, BOM, etc.
+// Certains LLM en sèment parfois en début de ligne, ce qui casse la
+// reconnaissance des mots-clés Gherkin si on s'appuie uniquement sur
+// trim() + ^Keyword.
+const INVISIBLE_LEADING = "[\\s\\u200B-\\u200F\\u2028\\u2029\\uFEFF\\u00A0]*";
+
+// Mots-clés des étapes Gherkin (EN + FR). Exporté car ré-utilisé dans
+// app/test-cases pour la détection des scénarios incomplets et pour
+// la coloration du GherkinViewer.
+export const STEP_KEYWORD_RE = new RegExp(
+  `^${INVISIBLE_LEADING}(Given|When|Then|And|But|[ÉE]tant donn[ée]|Quand|Alors|Et|Mais)\\b`,
+  "i",
+);
+
+// Regex qui capture le mot-clé + le reste de la ligne, en absorbant
+// tout blanc invisible éventuel devant. Utilisée par normalizeStepIndent.
+const STEP_SPLIT_RE = new RegExp(
+  `^${INVISIBLE_LEADING}(Given|When|Then|And|But|[ÉE]tant donn[ée]|Quand|Alors|Et|Mais)(.*)$`,
+  "i",
+);
+
+// Lignes de section : Scenario:, Feature:, Background:, Examples: et
+// leurs équivalents français. On les ramène à la colonne 0 pour avoir
+// une convention Gherkin standard et stable.
+const SECTION_SPLIT_RE = new RegExp(
+  `^${INVISIBLE_LEADING}(Scenario(?: Outline)?|Sc[ée]nario(?: Outline)?|Plan du Sc[ée]nario|Feature|Fonctionnalit[ée]|Background|Contexte|Examples|Exemples|Rule)(.*)$`,
+  "i",
+);
+
+// Lignes "parasites" qu'on supprime du Gherkin rendu :
+// - fences markdown ``` que certains LLM mettent malgré la consigne
+// - lignes 100% vides de fences seules
+const FENCE_LINE_RE = /^\s*```\s*\w*\s*$/;
+
+const STEP_LEADING_INDENT = "  "; // 2 espaces avant le mot-clé
+
+/**
+ * Calcule la largeur du mot-clé le plus long présent dans le code, de
+ * sorte que le contenu de toutes les lignes step démarre à la même
+ * colonne après normalisation. Plancher à 5 ("Given") pour garder une
+ * marge visuelle même quand seuls des mots-clés courts sont utilisés.
+ */
+function maxStepKeywordWidth(code: string): number {
+  let max = 5;
+  for (const line of code.split("\n")) {
+    const m = line.match(STEP_SPLIT_RE);
+    if (m && m[1].length > max) max = m[1].length;
+  }
+  return max;
+}
+
+/**
+ * Normalise une step line : 2 espaces d'indent, mot-clé padé à la
+ * largeur cible, puis le reste tel quel. Effet : les phrases qui
+ * suivent les mots-clés démarrent toutes à la même colonne.
+ *
+ *   "Given foo"     → "  Given foo"
+ *   "When bar"      → "  When  bar"
+ *   "And baz"       → "  And   baz"
+ *   "  Then qux"    → "  Then  qux"
+ *
+ * Les lignes qui ne sont pas des steps (Scenario:, tags, tables,
+ * commentaires, etc.) sont laissées intactes.
+ */
+/**
+ * Ramène une ligne de section (Scenario:, Feature:, Background:,
+ * Examples:, etc.) à la colonne 0 en absorbant tout blanc invisible.
+ * Garantit que toutes les sections démarrent à la même position quel
+ * que soit le caprice d'indentation du LLM.
+ */
+function normalizeSectionIndent(line: string): string {
+  const m = line.match(SECTION_SPLIT_RE);
+  if (!m) return line;
+  const keyword = m[1];
+  const rest = m[2];
+  return `${keyword}${rest.trimEnd()}`;
+}
+
+function normalizeStepIndent(line: string, kwWidth: number): string {
+  if (!line.trim()) return line;
+  // STEP_SPLIT_RE absorbe directement les éventuels caractères invisibles
+  // en tête de ligne, donc pas besoin de trim explicite ici.
+  const m = line.match(STEP_SPLIT_RE);
+  if (!m) return line;
+  const keyword = m[1];
+  const rest = m[2]; // inclut l'espace initial après le mot-clé s'il y en a
+  const padding = " ".repeat(Math.max(kwWidth - keyword.length, 0));
+  // On garantit au moins un espace entre le keyword (paddé) et le contenu.
+  const cleanedRest = rest.startsWith(" ") ? rest : " " + rest;
+  return `${STEP_LEADING_INDENT}${keyword}${padding}${cleanedRest.trimEnd()}`;
+}
+
+/**
+ * Applique l'ensemble des normalisations Gherkin à un texte entier :
+ * strip des fences markdown, sections ramenées à la colonne 0, steps
+ * indentées et alignées sur le contenu. Source de vérité unique pour
+ * tous les chemins de réécriture (hydratation localStorage, édition,
+ * etc.) — applique exactement les mêmes transformations que parseGherkin.
+ */
+export function normalizeGherkinText(text: string): string {
+  if (!text) return text;
+  const kwWidth = maxStepKeywordWidth(text);
+  return text
+    .split("\n")
+    .filter((line) => !FENCE_LINE_RE.test(line))
+    .map((line) => normalizeSectionIndent(line))
+    .map((line) => normalizeStepIndent(line, kwWidth))
+    .join("\n");
+}
+
 /**
  * Découpe un document Gherkin en scénarios.
  *
@@ -88,7 +199,19 @@ const TAG_LINE_RE = /^\s*@[\w-]+(?:\s+@[\w-]+)*\s*$/;
  * intégrés à leur Scenario Outline parent.
  */
 export function parseGherkin(code: string): ParsedGherkin {
-  const lines = code.split("\n");
+  // Pré-pass : applique trois normalisations sur le code brut LLM avant
+  // le découpage en scénarios :
+  // 1. Strip les fences markdown ```...``` que le LLM peut laisser
+  //    malgré la consigne.
+  // 2. Ramène les lignes de section (Scenario:, Feature:, etc.) à la
+  //    colonne 0.
+  // 3. Force l'indent + padding sur chaque step pour aligner le contenu.
+  const kwWidth = maxStepKeywordWidth(code);
+  const lines = code
+    .split("\n")
+    .filter((line) => !FENCE_LINE_RE.test(line))
+    .map((line) => normalizeSectionIndent(line))
+    .map((line) => normalizeStepIndent(line, kwWidth));
 
   let feature: string | null = null;
   let background: string | null = null;

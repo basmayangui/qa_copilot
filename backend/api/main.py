@@ -327,12 +327,12 @@ def raw_specification(filename: str):
 # ------------------------------------------------------------------
 # Endpoint conversationnel — assistant IA QA branché sur le RAG
 # ------------------------------------------------------------------
-from langchain_openai import ChatOpenAI
-
 from api.rag.retriever import retrieve_context
+from api.llm_client import get_chat_llm
 
-# LLM partagé avec gherkin_agent — modèle léger, suffisant pour le chat
-_chat_llm = ChatOpenAI(model="gpt-5-nano")
+# Même client LLM que gherkin_agent : configuré via env vars
+# (LLM_BASE_URL, LLM_API_KEY, LLM_MODEL) — voir api/llm_client.py.
+_chat_llm = get_chat_llm()
 
 _SYSTEM_PROMPT = (
     "Tu es l'assistant IA d'EXPERSI QA Copilot. Ton rôle principal est "
