@@ -95,6 +95,35 @@ export const STEP_KEYWORD_RE = new RegExp(
   "i",
 );
 
+// Regex spécialisées par type — servent au splitter multi-When et à la
+// résolution du type "hérité" des steps And/But.
+const GIVEN_RE = new RegExp(
+  `^${INVISIBLE_LEADING}(Given|[ÉE]tant donn[ée])\\b`,
+  "i",
+);
+const WHEN_RE = new RegExp(
+  `^${INVISIBLE_LEADING}(When|Quand)\\b`,
+  "i",
+);
+const THEN_RE = new RegExp(
+  `^${INVISIBLE_LEADING}(Then|Alors)\\b`,
+  "i",
+);
+const AND_BUT_RE = new RegExp(
+  `^${INVISIBLE_LEADING}(And|But|Et|Mais)\\b`,
+  "i",
+);
+
+type ResolvedStepType = "given" | "when" | "then" | null;
+
+function classifyStep(line: string, prev: ResolvedStepType): ResolvedStepType {
+  if (GIVEN_RE.test(line)) return "given";
+  if (WHEN_RE.test(line)) return "when";
+  if (THEN_RE.test(line)) return "then";
+  if (AND_BUT_RE.test(line)) return prev; // hérite du type précédent
+  return null;
+}
+
 // Regex qui capture le mot-clé + le reste de la ligne, en absorbant
 // tout blanc invisible éventuel devant. Utilisée par normalizeStepIndent.
 const STEP_SPLIT_RE = new RegExp(
@@ -112,8 +141,10 @@ const SECTION_SPLIT_RE = new RegExp(
 
 // Lignes "parasites" qu'on supprime du Gherkin rendu :
 // - fences markdown ``` que certains LLM mettent malgré la consigne
+// - séparateurs horizontaux markdown (---, ***, ___) que Mistral ajoute
+//   parfois entre plusieurs Features pour "structurer" sa réponse
 // - lignes 100% vides de fences seules
-const FENCE_LINE_RE = /^\s*```\s*\w*\s*$/;
+const FENCE_LINE_RE = /^\s*(?:```\s*\w*|-{3,}|\*{3,}|_{3,})\s*$/;
 
 const STEP_LEADING_INDENT = "  "; // 2 espaces avant le mot-clé
 
@@ -168,9 +199,18 @@ function normalizeStepIndent(line: string, kwWidth: number): string {
   const keyword = m[1];
   const rest = m[2]; // inclut l'espace initial après le mot-clé s'il y en a
   const padding = " ".repeat(Math.max(kwWidth - keyword.length, 0));
-  // On garantit au moins un espace entre le keyword (paddé) et le contenu.
-  const cleanedRest = rest.startsWith(" ") ? rest : " " + rest;
-  return `${STEP_LEADING_INDENT}${keyword}${padding}${cleanedRest.trimEnd()}`;
+  // On normalise l'espacement entre le keyword (paddé) et le contenu à
+  // EXACTEMENT un espace : on retire tous les espaces de tête éventuels
+  // ("Given    foo" → "foo"), puis on préfixe par " ". Sans ça, des
+  // LLM verbeux qui mettent 3-4 espaces après le keyword cassent
+  // l'alignement parce que padding + leur whitespace = total variable.
+  const content = rest.replace(/^\s+/, "").trimEnd();
+  // Cas dégénéré : keyword sans contenu (step tronqué) → on évite
+  // une espace pendante en fin de ligne.
+  if (!content) {
+    return `${STEP_LEADING_INDENT}${keyword}${padding}`;
+  }
+  return `${STEP_LEADING_INDENT}${keyword}${padding} ${content}`;
 }
 
 /**
@@ -384,7 +424,152 @@ export function parseGherkin(code: string): ParsedGherkin {
   }
   flushScenario();
 
+  // Défense en profondeur : split des scénarios à plusieurs cycles
+  // When → Then. Mistral, malgré les consignes BDD strictes, produit
+  // parfois un mégascénario qui enchaîne plusieurs transitions. On le
+  // découpe en N sous-scénarios — chacun reprend les Given du parent
+  // + un unique cycle When/Then. Les titres sont suffixés par
+  // "(étape X/N)" pour rester traçables.
+  const splitScenarios: ParsedScenario[] = [];
+  for (const scn of scenarios) {
+    const subScns = splitMultiWhenScenario(scn);
+    splitScenarios.push(...subScns);
+  }
+  // Renumérote les clientId pour rester stables / contigus côté React.
+  for (let i = 0; i < splitScenarios.length; i++) {
+    splitScenarios[i].clientId = `scn-${i}`;
+  }
+  scenarios.length = 0;
+  scenarios.push(...splitScenarios);
+
+  // Défense en profondeur : si un Background a été parsé (parce que le
+  // LLM a ignoré la consigne "pas de Background"), on injecte ses steps
+  // dans CHAQUE scénario juste après la ligne "Scenario:". Sans ça, les
+  // scénarios validés perdraient leur contexte initial une fois envoyés
+  // au générateur de scripts Playwright.
+  if (background) {
+    const bgSteps: string[] = [];
+    for (const bgLine of background.split("\n")) {
+      const t = bgLine.trim();
+      if (!t) continue;
+      if (BACKGROUND_RE.test(t)) continue; // saute l'en-tête "Background:"
+      if (STEP_KEYWORD_RE.test(t)) bgSteps.push(bgLine);
+    }
+    if (bgSteps.length > 0) {
+      for (const scn of scenarios) {
+        const scnLines = scn.rawText.split("\n");
+        let scenarioIdx = -1;
+        for (let i = 0; i < scnLines.length; i++) {
+          if (SCENARIO_RE.test(scnLines[i].trim())) {
+            scenarioIdx = i;
+            break;
+          }
+        }
+        if (scenarioIdx >= 0) {
+          const before = scnLines.slice(0, scenarioIdx + 1);
+          const after = scnLines.slice(scenarioIdx + 1);
+          scn.rawText = [...before, ...bgSteps, ...after].join("\n");
+        }
+      }
+      // On vide le Background standalone : son contenu vit maintenant
+      // dans chaque scenario.rawText.
+      background = null;
+    }
+  }
+
   return { feature, background, scenarios };
+}
+
+// --------------------------------------------------------------------
+// Splitter : un scénario à plusieurs cycles When → Then devient N
+// sous-scénarios autonomes. Best-effort : les Given du parent sont
+// recopiés en tête de chaque sous-scénario. Le Given peut ne pas
+// refléter parfaitement l'état réel au moment du cycle (le 2e cycle
+// commence en théorie là où le 1er s'est terminé), mais c'est mieux
+// que de perdre le contexte initial ou de garder un mégascénario.
+// --------------------------------------------------------------------
+function splitMultiWhenScenario(scn: ParsedScenario): ParsedScenario[] {
+  const lines = scn.rawText.split("\n");
+
+  // Localise la ligne "Scenario:" — point d'ancrage pour reconstruire
+  // les sous-scénarios.
+  let scenarioIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (SCENARIO_RE.test(lines[i].trim())) {
+      scenarioIdx = i;
+      break;
+    }
+  }
+  if (scenarioIdx < 0) return [scn];
+
+  const headerLines = lines.slice(0, scenarioIdx); // lignes avant Scenario: (rare)
+  const scenarioLine = lines[scenarioIdx];
+  const bodyLines = lines.slice(scenarioIdx + 1);
+
+  // Partitionne le body :
+  //   - givenLines : Given(s) qui précèdent le 1er When (contexte commun)
+  //   - cycles[i]  : lignes formant un cycle When/Then/And... unique
+  const givenLines: string[] = [];
+  const cycles: string[][] = [];
+  let currentCycle: string[] = [];
+  let prev: ResolvedStepType = null;
+  let inCycle = false;
+
+  for (const line of bodyLines) {
+    // Distinction CRITIQUE : un "When" EXPLICITE (mot-clé littéral)
+    // marque une frontière de cycle. Un "And"/"But" qui hérite
+    // sémantiquement de "when" reste DANS le cycle courant — sinon
+    // on découpe à tort à chaque "And je clique...".
+    const isExplicitWhen = WHEN_RE.test(line);
+    const type = classifyStep(line, prev);
+
+    if (isExplicitWhen) {
+      // Démarre un nouveau cycle. Le précédent (s'il y en a un) est figé.
+      if (currentCycle.length > 0) cycles.push(currentCycle);
+      currentCycle = [line];
+      inCycle = true;
+      prev = "when";
+    } else if (type === "given" && !inCycle) {
+      givenLines.push(line);
+      prev = "given";
+    } else {
+      // Continuation : Given mid-cycle, Then, And/But hérité, table
+      // row, ligne vide, commentaire... → reste dans le cycle courant
+      // si commencé, sinon attache aux Given.
+      if (inCycle) {
+        currentCycle.push(line);
+      } else {
+        givenLines.push(line);
+      }
+      if (type !== null) prev = type;
+    }
+  }
+  if (currentCycle.length > 0) cycles.push(currentCycle);
+
+  // 0 ou 1 cycle → pas de split nécessaire. On retourne le scénario tel
+  // quel (objet existant, pour ne pas casser les références).
+  if (cycles.length <= 1) return [scn];
+
+  // 2+ cycles → split. Chaque sous-scénario hérite des Given du parent.
+  const scenarioMatch = scenarioLine.trim().match(SCENARIO_RE);
+  const baseTitle = scenarioMatch?.[1]?.trim() || scn.title;
+
+  return cycles.map((cycleLines, i) => {
+    const subTitle = `${baseTitle} (étape ${i + 1}/${cycles.length})`;
+    const subScenarioLine = `Scenario: ${subTitle}`;
+    const rawLines = [
+      ...headerLines,
+      subScenarioLine,
+      ...givenLines,
+      ...cycleLines,
+    ];
+    return {
+      clientId: `${scn.clientId}-${i + 1}`, // sera renumérota juste après
+      title: subTitle,
+      tags: scn.tags,
+      rawText: rawLines.join("\n").replace(/\n+$/, ""),
+    };
+  });
 }
 
 // --------------------------------------------------------------------

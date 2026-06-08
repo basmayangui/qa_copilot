@@ -37,9 +37,17 @@ TEST_TYPE_INSTRUCTIONS = {
         "Type de tests : NON-RÉGRESSION.\n"
         "Génère des scénarios qui couvrent les CHEMINS CRITIQUES qu'il "
         "ne faut PAS casser entre deux versions. Concentre-toi sur :\n"
-        "- les fonctionnalités les plus utilisées (parcours principaux)\n"
+        "- les fonctionnalités les plus utilisées (un scénario = UNE "
+        "fonctionnalité ou UNE action critique, JAMAIS un parcours "
+        "multi-étapes enchaîné)\n"
         "- les règles métier sensibles (calculs, autorisations, totaux)\n"
         "- les intégrations clés\n"
+        "RAPPEL STRUCTUREL : même pour un parcours utilisateur multi-pages, "
+        "tu écris UN scénario PAR transition (1 clic → 1 vérification), pas "
+        "un seul mégascénario qui enchaîne plusieurs When/Then. Si "
+        "l'utilisateur navigue de la page A vers B puis vers C, ça fait "
+        "DEUX scénarios : 'A→B' avec Given A / When clic / Then B, et "
+        "'B→C' avec Given B / When clic / Then C.\n"
         "Tague chaque scénario avec @regression et @critical pour qu'ils "
         "soient pris en compte par la CI à chaque livraison."
     ),
@@ -77,8 +85,11 @@ DETAIL_LEVEL_INSTRUCTIONS = {
         "- Génère entre 5 et 8 scénarios.\n"
         "- Couvre les chemins nominaux (happy paths) et les cas d'usage "
         "principaux.\n"
-        "- Pas de tags Gherkin avancés, pas de Scenario Outline, pas de "
-        "Background sauf nécessité évidente.\n"
+        "- Tague chaque scénario avec AU MOINS UN tag de base parmi : "
+        "@smoke (parcours essentiel), @nominal (cas standard), "
+        "@happy (chemin sans erreur). Le tag est placé sur la ligne "
+        "JUSTE AVANT 'Scenario:'.\n"
+        "- Pas de Scenario Outline.\n"
         "- Style clair et concis, accessible à un non-spécialiste QA."
     ),
     "avance": (
@@ -89,12 +100,16 @@ DETAIL_LEVEL_INSTRUCTIONS = {
         "moins un cas de validation d'entrée invalide.\n"
         "- Utilise des tags Gherkin pour catégoriser : @happy, @error, "
         "@edge selon les scénarios.\n"
-        "- Tu peux utiliser un Background si plusieurs scénarios partagent "
-        "le même contexte initial."
+        "- RAPPEL : chaque Scenario commence par ses propres Given — "
+        "tu ne factorises JAMAIS dans un Background."
     ),
     "expert": (
         "Niveau de détail attendu : EXPERT QA.\n"
-        "- Génère une couverture exhaustive : 15 à 25 scénarios.\n"
+        "- Génère ENTRE 15 ET 25 scénarios — NE DÉPASSE JAMAIS 25, "
+        "même si le projet est riche. Si tu as plus de cas à couvrir, "
+        "garde ceux qui ont la plus forte valeur business et écarte "
+        "les autres. Compte tes Scenario/Scenario Outline avant de "
+        "renvoyer la réponse.\n"
         "- Couvre : chemins nominaux et alternatifs, cas d'erreur (avec "
         "messages et codes retour attendus), valeurs limites et "
         "équivalence partitionnée, scénarios de sécurité (autorisation, "
@@ -104,8 +119,10 @@ DETAIL_LEVEL_INSTRUCTIONS = {
         "data-driven (paramétrage par jeu de données).\n"
         "- Utilise des tags riches : @smoke, @regression, @security, "
         "@perf, @edge, @critical selon le scénario.\n"
-        "- Utilise un Background pour factoriser les pré-conditions "
-        "partagées.\n"
+        "- RAPPEL : chaque Scenario commence par ses propres Given — "
+        "tu ne factorises JAMAIS dans un Background. La répétition de "
+        "Given identiques entre scénarios est acceptée et préférée à "
+        "un Background partagé.\n"
         "- Précise les pré-conditions techniques quand pertinent."
     ),
 }
@@ -149,6 +166,13 @@ def generate_gherkin(state: AgentState):
     - Utilise IMPÉRATIVEMENT les mots-clés Gherkin EN ANGLAIS :
       Feature, Background, Scenario, Scenario Outline, Examples,
       Given, When, Then, And, But.
+    - UNE SEULE ligne "Feature:" dans toute la réponse. Si le projet
+      couvre plusieurs sujets, regroupe-les sous une Feature unique
+      dont le titre est le nom du projet. JAMAIS plusieurs "Feature:"
+      dans la même réponse.
+    - INTERDIT : séparateurs horizontaux ("---", "***", "___") ou
+      titres markdown (#, ##) entre les scénarios. Tu produis du
+      Gherkin pur, pas du markdown structuré.
     - Chaque scénario DOIT commencer EXACTEMENT par "Scenario: " (avec
       les deux-points et un espace) suivi du titre. Exemple :
         Scenario: Connexion réussie
@@ -163,6 +187,41 @@ def generate_gherkin(state: AgentState):
     - Le contenu (titres, descriptions, étapes) peut être en français.
     - Ne mets PAS de bloc markdown ```gherkin ... ``` autour du résultat,
       renvoie le Gherkin brut directement.
+
+    RÈGLES BDD (qualité des scénarios) :
+    - Chaque "Scenario:" doit être AUTO-SUFFISANT : il commence
+      IMPÉRATIVEMENT par au moins un "Given" qui pose le contexte
+      initial, MÊME SI ce contexte est partagé par plusieurs scénarios.
+      Ne factorise JAMAIS les pré-conditions dans un "Background:"
+      séparé.
+    - INTERDIT : la section "Background:" est interdite. Chaque
+      scénario doit pouvoir être exécuté indépendamment des autres et
+      être converti en script Playwright autonome — sans cela, le
+      contexte initial est perdu lors de la génération du script.
+    - Chaque "Scenario:" ne décrit QU'UN SEUL comportement. Structure
+      attendue : UN OU PLUSIEURS Given (contexte), UN SEUL When
+      (éventuellement étendu par "And"), puis UN OU PLUSIEURS Then
+      (étendus par "And").
+    - INTERDIT : enchaîner plusieurs cycles When → Then dans le même
+      scénario (When → Then → When → Then → When → Then). Si tu
+      ressens le besoin de tester plusieurs entrées / variantes :
+        * Soit tu écris PLUSIEURS scénarios distincts (un par variante),
+          chacun avec son propre couple When/Then.
+        * Soit tu utilises UN "Scenario Outline:" avec une table
+          "Examples:" qui paramètre la valeur d'entrée et la sortie
+          attendue. Exemple :
+            Scenario Outline: Validation du format email
+              Given je suis sur le formulaire de candidature
+              When je saisis "<email>" dans le champ "Courriel"
+              And je clique sur "Envoyer ma candidature"
+              Then je vois "<message>"
+              Examples:
+                | email                  | message                          |
+                | jeandupont             | Format d'email invalide          |
+                | jeandupont@test        | Format d'email invalide          |
+                | jeandupont@test.fr     | (aucun message)                  |
+    - Un scénario qui tient en 5-8 steps reste préférable à un
+      mégascénario qui valide 3 variantes d'affilée.
 
     PROJET : {project_name}
 

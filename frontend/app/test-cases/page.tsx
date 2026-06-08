@@ -819,7 +819,13 @@ const STEP_KEYWORDS = [
 ];
 
 function GherkinViewer({ code }: { code: string }) {
-  const lines = code.split("\n");
+  // Filet de sécurité : on re-normalise systématiquement à l'affichage.
+  // Toutes les autres entrées (parseGherkin, resetScenarioState, saveEdit,
+  // hydratation localStorage) sont censées déjà passer par normalizeGherkinText,
+  // mais si une régression ou un draft hérité passe à travers, le viewer
+  // garantit quand même un rendu propre.
+  const normalized = normalizeGherkinText(code);
+  const lines = normalized.split("\n");
 
   return (
     <div className="bg-[#050816] overflow-hidden">
