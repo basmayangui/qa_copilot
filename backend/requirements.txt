@@ -28,6 +28,26 @@ langchain-chroma>=0.1.4
 openai>=1.50.0
 tiktoken>=0.8.0
 
+# ---------- Embeddings locaux HuggingFace ----------
+# Modèle d'embedding exécuté en local (sentence-transformers).
+# Aucune donnée ne quitte le serveur — souveraineté maximale.
+# Recommandé : BAAI/bge-m3 (multilingue, dim 1024).
+#
+# IMPORTANT — alignement de versions :
+#   - torch : Intel Mac (x86_64) plafonne à 2.2.2 (les wheels macOS
+#     x86_64 ne sont plus publiés au-delà). Linux / Apple Silicon
+#     peuvent monter plus haut.
+#   - transformers >= 4.46 exige torch >= 2.4 → on cap < 4.46 pour
+#     rester compatible Intel Mac. Sinon le backend PyTorch est
+#     désactivé et on obtient "NameError: name 'nn' is not defined".
+#   - numpy < 2 : torch 2.2.x a été compilé contre NumPy 1.x. NumPy
+#     2.x déclenche un warning ABI puis des crashes possibles.
+torch>=2.2
+numpy>=1.26,<2
+transformers>=4.41,<4.46
+sentence-transformers>=3.0,<4
+langchain-huggingface>=0.1.0
+
 # ---------- Vector DB ----------
 chromadb>=0.5.20
 

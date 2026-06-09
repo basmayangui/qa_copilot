@@ -16,15 +16,15 @@ load_dotenv()
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
-from langchain_openai import OpenAIEmbeddings
 
 from api.rag.loaders import load_document
+from api.embeddings_client import get_embeddings
 
 
-# Modèle d'embedding. text-embedding-3-small est 5x plus rapide et moins
-# cher qu'ada-002, avec une meilleure qualité. Configurable via env si
-# besoin de revenir en arrière ou de monter en 3-large.
-EMBED_MODEL = os.getenv("RAG_EMBED_MODEL", "text-embedding-3-small")
+# Modèle d'embedding effectif — lu depuis l'env via embeddings_client.
+# Le nom est aussi conservé ici pour le manifest (détection de changement
+# de modèle, qui déclenche un rebuild complet automatique).
+EMBED_MODEL = os.getenv("RAG_EMBED_MODEL", "").strip()
 
 # Taille de batch pour l'envoi des chunks au service d'embeddings.
 # 256 reste sous les limites TPM des principaux fournisseurs.
@@ -90,7 +90,7 @@ MANIFEST_FILE = CHROMA_DIR / ".manifest.json"
 
 SUPPORTED_EXTS = {".pdf", ".docx", ".txt"}
 
-embedding_model = OpenAIEmbeddings(model=EMBED_MODEL)
+embedding_model = get_embeddings()
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1000,

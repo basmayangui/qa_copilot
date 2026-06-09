@@ -109,7 +109,7 @@ Upload PDF/DOCX/TXT
    -> add_file_to_index(fichier)
         -> suppression d'éventuels chunks précédents (re-upload safe)
         -> chargement + chunking du fichier (1000 chars / 200 overlap)
-        -> embeddings OpenAI + ajout à Chroma existant
+        -> embeddings HuggingFace (local) + ajout à Chroma existant
         -> mise à jour du manifeste pour ce fichier
    -> LangGraph utilise immédiatement l'index enrichi
 
@@ -171,44 +171,31 @@ npm install
 Créer le fichier `backend/.env` :
 
 ```env
-OPENAI_API_KEY=sk-...
-
 # --- LLM (chat + génération Gherkin + scripts Playwright) ---
-#
-# Par défaut, l'API OpenAI publique est utilisée (non souveraine).
-# Pour basculer sur Mistral via OVH AI Endpoints (souverain, RGPD,
-# données hébergées en UE) :
-LLM_PROVIDER=mistral_ovh
-LLM_BASE_URL=https://mistral-small-24b-instruct-2501.endpoints.kepler.ai.cloud.ovh.net/api/openai_compat/v1
-LLM_API_KEY=<token-ovh-ai-endpoints>
-LLM_MODEL=Mistral-Small-24B-Instruct-2501
+LLM_PROVIDER=mistral
+LLM_BASE_URL=https://api.mistral.ai/v1
+LLM_API_KEY=<clé-mistral>
+LLM_MODEL=mistral-small-latest
 # Optionnels :
 # LLM_TEMPERATURE=0.4
 # LLM_MAX_TOKENS=8000
 
-# --- Pipeline RAG (toutes ces variables sont optionnelles) ---
+# --- Embeddings (pipeline RAG) — modèle local HuggingFace ---
+# Calcul des embeddings 100 % en local via sentence-transformers.
+# Aucune donnée ne quitte le serveur QA Copilot.
+RAG_EMBED_PROVIDER=huggingface
+RAG_EMBED_MODEL=BAAI/bge-m3
+RAG_EMBED_DEVICE=cpu          # "cuda" si GPU NVIDIA disponible
+RAG_EMBED_NORMALIZE=true
 
-# Modèle d'embedding OpenAI.
-#   text-embedding-3-small : 5x plus rapide que ada-002, recommandé (défaut)
-#   text-embedding-3-large : qualité maximale, plus cher
-#   text-embedding-ada-002 : ancien modèle
-# Tout changement déclenche un rebuild complet automatique au démarrage.
-RAG_EMBED_MODEL=text-embedding-3-small
-
-# Nombre de chunks envoyés par batch au service d'embeddings.
-RAG_EMBED_BATCH_SIZE=256
-
-# Pause (secondes) entre deux batches pour ménager le TPM.
-RAG_EMBED_BATCH_PAUSE_SEC=0.1
-
-# Threads pour le chargement parallèle des fichiers (Phase 1 du rebuild).
+# --- Performance du pipeline RAG (optionnels) ---
+RAG_EMBED_BATCH_SIZE=64
+RAG_EMBED_BATCH_PAUSE_SEC=0
 RAG_LOAD_MAX_WORKERS=8
-
-# Intervalle (secondes) entre deux scans automatiques de uploaded_docs/.
-RAG_WATCH_INTERVAL_SEC=30
+RAG_WATCH_INTERVAL_SEC=10
 ```
 
-**Note** : un changement de `RAG_EMBED_MODEL` est détecté automatiquement (le nom du modèle est inclus dans `chroma_db/.manifest.json`) et déclenche un rebuild complet au prochain démarrage.
+**Note** : un changement de `RAG_EMBED_MODEL` est détecté automatiquement (le nom du modèle est inclus dans `chroma_db/.manifest.json`) et déclenche un rebuild complet au prochain démarrage. Indispensable si on change de fournisseur, car les vecteurs n'ont pas la même dimension d'un modèle à l'autre.
 
 #### Souveraineté du LLM
 
@@ -284,9 +271,15 @@ L'application est accessible sur **http://localhost:3000**.
 
 ### Embeddings
 
-`OpenAIEmbeddings` avec `text-embedding-3-small` par défaut (1536 dimensions, plus rapide et moins cher que `ada-002`). Le modèle est piloté par la variable `RAG_EMBED_MODEL` dans `backend/.env`.
+Le module `api/embeddings_client.py` centralise la création du client d'embeddings à partir des variables d'environnement. Deux familles de providers sont supportées :
 
-Le nom du modèle est inclus dans `chroma_db/.manifest.json` : tout changement déclenche un rebuild complet automatique au prochain démarrage, sans intervention manuelle.
+1. **`huggingface`** (défaut recommandé pour la souveraineté maximale) : modèles **locaux** chargés via `sentence-transformers`. Aucune donnée ne quitte le serveur, compatible air-gap une fois le modèle téléchargé. Modèle recommandé : **`BAAI/bge-m3`** (multilingue, dimension 1024, licence MIT).
+
+2. **Endpoint compatible OpenAI** : utile pour rester sur un service cloud souverain UE (Mistral via `api.mistral.ai`, OVH AI Endpoints, vLLM auto-hébergé). Variables : `RAG_EMBED_BASE_URL`, `RAG_EMBED_API_KEY`, `RAG_EMBED_MODEL`.
+
+Le mode est sélectionné par `RAG_EMBED_PROVIDER`. En mode HuggingFace, `RAG_EMBED_DEVICE` (`cpu`/`cuda`) et `RAG_EMBED_NORMALIZE` (`true`/`false`) permettent de piloter le calcul local.
+
+Le nom du modèle est inclus dans `chroma_db/.manifest.json` : tout changement déclenche un rebuild complet automatique au prochain démarrage, sans intervention manuelle. Indispensable lors d'un changement de fournisseur ou de modèle, car la dimension vectorielle varie (1024 pour `bge-m3` et `mistral-embed`, 768 pour `e5-base`, etc.).
 
 ### Chargement des PDF
 
