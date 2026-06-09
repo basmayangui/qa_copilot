@@ -14,7 +14,28 @@ import {
   Search,
   Clock3,
   Loader2,
+  AlertTriangle,
+  X,
+  RefreshCw,
 } from "lucide-react";
+
+/**
+ * Normalise un nom de fichier pour la détection de doublons :
+ * - décomposition NFD + strip des marques diacritiques (é → e)
+ * - lowercase
+ *
+ * Sans ça, "Spec.pdf" / "spec.pdf" / "spéc.pdf" passeraient pour des
+ * documents distincts côté UI alors que l'utilisateur veut le même.
+ */
+function normalizeFileName(name: string): string {
+  return name
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase();
+}
+
+/** Action choisie par l'utilisateur dans la modal de doublon. */
+type DuplicateAction = "replace" | "cancel";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
@@ -65,6 +86,31 @@ export default function SpecificationsPage() {
   const [totalIndexed, setTotalIndexed] = useState(0);
 
   const [uploading, setUploading] = useState(false);
+
+  // Modal de doublon : quand l'utilisateur tente d'uploader un fichier
+  // dont le nom (normalisé NFD + lowercase) matche un fichier déjà
+  // indexé. La promise est résolue par l'un des 3 boutons du modal et
+  // débloque la suite de la boucle d'upload dans handleUpload.
+  const [duplicatePrompt, setDuplicatePrompt] = useState<{
+    incomingName: string;
+    existingName: string;
+    resolve: (action: DuplicateAction) => void;
+  } | null>(null);
+
+  function askUserAboutDuplicate(
+    incomingName: string,
+    existingName: string,
+  ): Promise<DuplicateAction> {
+    return new Promise((resolve) => {
+      setDuplicatePrompt({ incomingName, existingName, resolve });
+    });
+  }
+
+  function answerDuplicate(action: DuplicateAction) {
+    if (!duplicatePrompt) return;
+    duplicatePrompt.resolve(action);
+    setDuplicatePrompt(null);
+  }
 
   // --- Recherche dans l'historique ---
   const [searchQuery, setSearchQuery] = useState("");
@@ -160,12 +206,38 @@ export default function SpecificationsPage() {
 
     setUploading(true);
 
+    let processedCount = 0;
+    let skippedCount = 0;
+
     try {
+
+      // Snapshot des noms déjà indexés au début du flow. Comme on
+      // n'attend pas un re-fetch entre chaque fichier, on capture
+      // une fois et on compare contre cette liste pour TOUTE la
+      // boucle (suffit pour détecter les doublons au moment où
+      // l'utilisateur a sélectionné le batch).
+      const existingByNormName = new Map(
+        files.map((f) => [normalizeFileName(f.name), f.name]),
+      );
 
       for (const file of Array.from(selectedFiles)) {
 
-        // FRONT → BACKEND
+        // Détection de doublon par nom normalisé (NFD + lowercase).
+        const existingName = existingByNormName.get(
+          normalizeFileName(file.name),
+        );
 
+        let action: DuplicateAction = "replace";
+        if (existingName) {
+          action = await askUserAboutDuplicate(file.name, existingName);
+        }
+
+        if (action === "cancel") {
+          skippedCount++;
+          continue;
+        }
+
+        // FRONT → BACKEND
         const formData = new FormData();
         formData.append("file", file);
 
@@ -174,20 +246,31 @@ export default function SpecificationsPage() {
           {
             method: "POST",
             body: formData,
-          }
+          },
         );
 
         if (!response.ok) {
           throw new Error("Erreur upload");
         }
+
+        processedCount++;
       }
 
       // Source de vérité = le backend. On recharge l'historique
       // au lieu d'ajouter en local (qui se perd au hot reload).
       await fetchHistory();
 
+      const parts: string[] = [];
+      if (processedCount > 0) {
+        parts.push(`${processedCount} indexé(s)`);
+      }
+      if (skippedCount > 0) {
+        parts.push(`${skippedCount} ignoré(s)`);
+      }
       alert(
-        "Documents uploadés et RAG reconstruit avec succès."
+        parts.length > 0
+          ? `Upload terminé — ${parts.join(", ")}.`
+          : "Upload terminé.",
       );
 
     } catch (error) {
@@ -791,6 +874,133 @@ export default function SpecificationsPage() {
         </div>
 
       </div>
+
+      {/* MODAL DOUBLON — apparaît quand l'utilisateur tente d'uploader
+          un fichier dont le nom matche un fichier déjà indexé.
+          Bloque la boucle handleUpload jusqu'à la décision. */}
+      {duplicatePrompt && (
+        <div
+          className="
+            fixed inset-0 z-50
+            flex items-center justify-center
+            bg-black/70 backdrop-blur-sm
+          "
+          onClick={() => answerDuplicate("cancel")}
+        >
+          <div
+            className="
+              relative max-w-xl w-full mx-6
+              rounded-3xl border border-[#7C3AED]/50
+              bg-[#0B1020] shadow-[0_0_40px_-12px_rgba(168,85,247,0.5)]
+            "
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Bouton fermer (X) */}
+            <button
+              onClick={() => answerDuplicate("cancel")}
+              aria-label="Fermer"
+              className="
+                absolute top-4 right-4
+                w-9 h-9 rounded-xl
+                border border-[#1E293B]
+                flex items-center justify-center
+                text-gray-400 hover:text-white hover:bg-[#111827]
+                transition
+              "
+            >
+              <X size={18} />
+            </button>
+
+            <div className="p-8">
+              <div className="flex items-start gap-4 mb-6">
+                <div
+                  className="
+                    w-12 h-12 rounded-2xl flex-shrink-0
+                    flex items-center justify-center
+                    bg-amber-500/15 border border-amber-500/40
+                  "
+                >
+                  <AlertTriangle size={24} className="text-amber-300" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold mb-1">
+                    Ce fichier existe déjà
+                  </h3>
+                  <p className="text-sm text-gray-400">
+                    Un document avec un nom équivalent est déjà indexé dans
+                    la base RAG.
+                  </p>
+                </div>
+              </div>
+
+              <div
+                className="
+                  rounded-2xl border border-[#1E293B]
+                  bg-[#050816] p-4 mb-6 text-sm
+                "
+              >
+                <div className="flex justify-between mb-1">
+                  <span className="text-gray-500">Fichier sélectionné :</span>
+                  <span className="text-gray-200 font-mono break-all text-right ml-2">
+                    {duplicatePrompt.incomingName}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Déjà indexé :</span>
+                  <span className="text-gray-200 font-mono break-all text-right ml-2">
+                    {duplicatePrompt.existingName}
+                  </span>
+                </div>
+              </div>
+
+              <p className="text-sm text-gray-400 mb-6">
+                Que souhaites-tu faire ?
+              </p>
+
+              <div className="flex flex-col gap-3">
+                <button
+                  onClick={() => answerDuplicate("replace")}
+                  className="
+                    w-full px-5 py-3 rounded-2xl
+                    bg-gradient-to-r from-[#7C3AED] to-[#C026D3]
+                    hover:brightness-110 transition
+                    flex items-center gap-3 text-left
+                  "
+                >
+                  <RefreshCw size={20} className="flex-shrink-0" />
+                  <div>
+                    <div className="font-semibold">Remplacer et ré-indexer</div>
+                    <div className="text-xs text-white/80">
+                      Écrase le fichier disque et reconstruit ses chunks dans
+                      Chroma.
+                    </div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => answerDuplicate("cancel")}
+                  className="
+                    w-full px-5 py-3 rounded-2xl
+                    border border-[#1E293B]
+                    hover:bg-[#0F172A] hover:border-red-500/40
+                    transition text-gray-300
+                    flex items-center gap-3 text-left
+                  "
+                >
+                  <X size={20} className="flex-shrink-0" />
+                  <div>
+                    <div className="font-semibold">Annuler cet upload</div>
+                    <div className="text-xs text-gray-400">
+                      Ne fait rien pour ce fichier. Les autres fichiers du
+                      batch continueront d'être traités.
+                    </div>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );
