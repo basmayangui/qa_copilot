@@ -514,6 +514,11 @@ function splitMultiWhenScenario(scn: ParsedScenario): ParsedScenario[] {
   let currentCycle: string[] = [];
   let prev: ResolvedStepType = null;
   let inCycle = false;
+  // Un cycle n'est "terminé" qu'à partir du moment où il a vu un Then.
+  // Sans ça, un "When" suivant est presque toujours une continuation que
+  // le LLM a mal libellée (ex : "When je remplis les champs / And ... /
+  // When je soumets / Then ..." — le 2e When est en fait un And).
+  let currentCycleHasThen = false;
 
   for (const line of bodyLines) {
     // Distinction CRITIQUE : un "When" EXPLICITE (mot-clé littéral)
@@ -521,14 +526,26 @@ function splitMultiWhenScenario(scn: ParsedScenario): ParsedScenario[] {
     // sémantiquement de "when" reste DANS le cycle courant — sinon
     // on découpe à tort à chaque "And je clique...".
     const isExplicitWhen = WHEN_RE.test(line);
+    const isExplicitThen = THEN_RE.test(line);
     const type = classifyStep(line, prev);
 
     if (isExplicitWhen) {
-      // Démarre un nouveau cycle. Le précédent (s'il y en a un) est figé.
-      if (currentCycle.length > 0) cycles.push(currentCycle);
-      currentCycle = [line];
-      inCycle = true;
-      prev = "when";
+      if (inCycle && !currentCycleHasThen) {
+        // Le cycle courant n'a pas encore de Then : ce "When" est
+        // probablement une continuation mal libellée par le LLM. On
+        // l'absorbe dans le cycle au lieu d'ouvrir un nouveau cycle
+        // qui se retrouverait sans Then.
+        currentCycle.push(line);
+        prev = "when";
+      } else {
+        // Soit pas encore de cycle, soit le cycle précédent a son
+        // Then : on clôt et on ouvre un nouveau cycle.
+        if (currentCycle.length > 0) cycles.push(currentCycle);
+        currentCycle = [line];
+        inCycle = true;
+        currentCycleHasThen = false;
+        prev = "when";
+      }
     } else if (type === "given" && !inCycle) {
       givenLines.push(line);
       prev = "given";
@@ -538,6 +555,7 @@ function splitMultiWhenScenario(scn: ParsedScenario): ParsedScenario[] {
       // si commencé, sinon attache aux Given.
       if (inCycle) {
         currentCycle.push(line);
+        if (isExplicitThen) currentCycleHasThen = true;
       } else {
         givenLines.push(line);
       }

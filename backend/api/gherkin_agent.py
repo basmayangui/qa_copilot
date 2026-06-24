@@ -202,6 +202,26 @@ def generate_gherkin(state: AgentState):
       attendue : UN OU PLUSIEURS Given (contexte), UN SEUL When
       (éventuellement étendu par "And"), puis UN OU PLUSIEURS Then
       (étendus par "And").
+    - ATTENTION particulière aux actions COMPOSITES (remplir des champs
+      PUIS soumettre un formulaire, ouvrir un menu PUIS cliquer dessus,
+      etc.) : la totalité de l'action utilisateur s'exprime avec UN seul
+      "When" suivi de "And" pour chaque sous-action. JAMAIS deux "When"
+      successifs dans le même scénario. Exemple correct :
+        Given je suis sur le formulaire de contact
+        When je saisis "Dupont" dans le champ "Nom"
+        And je saisis "Jean" dans le champ "Prénom"
+        And je clique sur le bouton "Envoyer"
+        Then je vois le message de confirmation
+      Exemple INCORRECT (à proscrire) :
+        Given je suis sur le formulaire de contact
+        When je saisis "Dupont" dans le champ "Nom"
+        And je saisis "Jean" dans le champ "Prénom"
+        When je clique sur le bouton "Envoyer"     <-- second When interdit
+        Then je vois le message de confirmation
+      Le test pour savoir si une étape doit être "When" ou "And" :
+      s'il s'agit de la PREMIÈRE action déclenchée par l'utilisateur dans
+      le scénario, c'est "When". Toutes les actions suivantes faisant
+      partie de la même séquence d'usage sont "And".
     - INTERDIT : enchaîner plusieurs cycles When → Then dans le même
       scénario (When → Then → When → Then → When → Then). Si tu
       ressens le besoin de tester plusieurs entrées / variantes :
